@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Assembly files
+*.asm
+*.s
+*.S
