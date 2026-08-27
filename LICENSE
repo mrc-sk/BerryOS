@@ -1,3 +1,35 @@
+================================================================================
+ADDITIONAL TERMS - Non-Commercial Restriction
+================================================================================
+
+This software is distributed under the GNU Affero General Public License
+version 3 (AGPLv3), a copy of which is provided below.
+
+These additional terms are provided as additional permissions under
+AGPLv3 Section 7. They supplement but do not replace the AGPLv3 license
+text below.
+
+Additional Restriction:
+Any commercial use, including but not limited to selling, integrating into
+paid products or services, offering as a hosted or software-as-a-service
+offering for profit, or any other for-profit activity, REQUIRES prior written
+authorization from the copyright holder. Alternatively, any commercial user
+may release their entire derived work under a GPL-compatible open source
+license, in which case this additional restriction does not apply.
+
+Non-commercial use (personal, educational, academic, internal, or research
+purposes) is permitted to modify, use, and distribute this software without
+being required to release modified source code, provided that all copyright
+notices and this permission statement are retained.
+
+Non-commercial distribution of modified binaries without corresponding source
+code is permitted, as long as the above conditions are met.
+
+In case of conflict between these additional terms and the AGPLv3, the
+stricter condition prevails.
+
+================================================================================
+
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
@@ -69,8 +101,8 @@ works, such as semiconductor masks.
 License.  Each licensee is addressed as "you".  "Licensees" and
 "recipients" may be individuals or organizations.
 
-  To "modify" a work means to copy from or adapt all or part of the work
-in a fashion requiring copyright permission, other than the making of an
+  To "modify" a work means to copy from or adapt all or part of the new
+work in a fashion requiring copyright permission, other than the making of an
 exact copy.  The resulting work is called a "modified version" of the
 earlier work or a work "based on" the earlier work.
 
@@ -630,7 +662,7 @@ state the exclusion of warranty; and each file should have at least
 the "copyright" line and a pointer to where the full notice is found.
 
     <one line to give the program's name and a brief idea of what it does.>
-    Copyright (C) <year>  <name of author>
+    Copyright (C) 2026 mrc-sk and imjumping
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published
