@@ -142,9 +142,10 @@ bootloader 无需 `int 0x13` 读盘，由 64 位阶段把内核搬到 0x100000 �
 qemu-system-x86_64 -drive file=build/berryos.iso,format=raw,if=ide,media=cdrom -boot d
 ```
 
-> 说明：`build/disk.img` 当前为 raw 硬盘镜像，bootloader 的 no-emulation
-> 路径不执行磁盘读取；从 raw 硬盘/USB 直接启动还需补充 `int 0x13` 读取
-> 分支（见路线图）。VMware 等虚拟机建议改挂上面的 ISO（cdrom）启动。
+> 说明：`build/disk.img` 为 **raw 硬盘/USB 镜像**，采用**两级引导**
+> （精简 MBR + 分区表 → stage2 → 内核）。可用
+> `qemu-system-x86_64 -hda build/disk.img` 启动，或直接 `dd` 写入 USB 启动。
+> ISO 走 El Torito no-emulation（内核由 BIOS 预加载到 0x7E00），两种方式均兼容。
 
 ### VMware Workstation 运行
 

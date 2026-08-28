@@ -27,7 +27,15 @@
  */
 
 .code16
+#ifdef DISK_BOOT
+/* Stage2 variant (raw hard disk / USB): MBR loads this at 0x7000 (low enough
+ * for 16-bit addressing, clear of the MBR @0x7C00, VBE @0x5000/0x6000 and the
+ * kernel loaded at 0x7E00). */
+.org 0x7000
+#else
+/* El Torito no-emulation ISO variant: BIOS loads boot sector at 0x7C00. */
 .org 0x7C00
+#endif
 .global _start
 _start:
     cli
@@ -51,26 +59,28 @@ _start:
     movw $0x07E0, %ax
     movw %ax, %es
     xorw %bx, %bx
-    movw $1, %di                 /* LBA start (sector 0 = boot) */
+#ifdef DISK_BOOT
+    movw $2, %di                 /* disk: LBA0=MBR, LBA1=stage2, kernel at LBA2 */
+#else
+    movw $1, %di                 /* ISO: kernel at LBA1 (after boot sector) */
+#endif
 load_loop:
-    movw %di, dap + 8            /* update DAP LBA low field */
+    movw %di, dap + 8            /* DAP LBA low field */
+    movw %bx, dap + 4            /* DAP buffer offset (advance with bx) */
     movb $0x42, %ah
-    pushw %di
-    pushw %es
-    pushw %bx
     int  $0x13
-    popw %bx
-    popw %es
-    popw %di
-    jc   skip_disk               /* fail -> kernel already in RAM / end of disk */
-    addw $0x200, %bx             /* advance buffer by 512 B (handle 64K wrap) */
-    jnc  1f
-    movw %es, %ax
-    addw $0x1000, %ax
-    movw %ax, %es
-1:
+#ifdef DISK_BOOT
+    jc   disk_fail               /* disk: a failed read is fatal (no kernel in RAM) */
+#else
+    jc   skip_disk               /* ISO: fail -> kernel already in RAM */
+#endif
+    addw $0x200, %bx             /* advance buffer offset (kernel < 64 KiB, single block) */
     incw %di
+#ifdef DISK_BOOT
+    cmpw $106, %di               /* read LBA 2..105 (104 sectors >= kernel size) */
+#else
     cmpw $257, %di               /* LBA 1..256 */
+#endif
     jne  load_loop
 skip_disk:
     /* --- VBE: set a 1024x768x32 linear-framebuffer (mode 0x4119) ---
@@ -220,9 +230,12 @@ DATA32_SEL = 0x10
 CODE64_SEL = 0x18
 DATA64_SEL = 0x20
 
+#ifdef DISK_BOOT
+. = 0x71EE
+#else
 . = 0x7DEE
-/* Disk Address Packet for int 0x13 AH=42h (LBA extended read).
- * 12 bytes fit at 0x7DEE..0x7DF9, leaving room for the 0x7DFE boot signature. */
+#endif
+/* Disk Address Packet for int 0x13 AH=42h (LBA extended read). */
 dap:
     .byte 0x10                  /* packet size */
     .byte 0                     /* reserved */
@@ -232,5 +245,9 @@ dap:
     .long 1                     /* LBA low  (start sector 1) */
     .long 0                     /* LBA high */
 
+#ifdef DISK_BOOT
+. = 0x71FE
+#else
 . = 0x7DFE
+#endif
 .word 0xAA55                   /* boot signature */

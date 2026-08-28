@@ -215,23 +215,36 @@ Write-Host "OBJCOPY $kernBin" -ForegroundColor Gray
 & $OBJCOPY -O binary $kernElf $kernBin
 
 # ---- bootloader ----
-$bootS  = Join-Path $BootDir "boot.S"
-$bootO  = Obj "boot.o"
-$bootElf = Obj "boot.elf"
-$bootBin = Obj "boot.bin"
-Write-Host "AS  $bootS" -ForegroundColor Gray
-& $CLANG $BASFLAGS.Split(' ') $bootS -o $bootO
-if ($LASTEXITCODE -ne 0) { Write-Error "asm failed: $bootS"; exit 1 }
-Write-Host "LD  $bootElf" -ForegroundColor Gray
-& $LDLD -T (Join-Path $BootDir "boot.ld") -o $bootElf $bootO
-if ($LASTEXITCODE -ne 0) { Write-Error "link failed"; exit 1 }
-Write-Host "OBJCOPY $bootBin" -ForegroundColor Gray
-& $OBJCOPY -O binary $bootElf $bootBin
+function Build-Boot {
+    param([string]$src, [string]$name, [string]$defines)
+    $o   = Obj "$name.o"
+    $elf = Obj "$name.elf"
+    $bin = Obj "$name.bin"
+    Write-Host "AS  $src ($name)" -ForegroundColor Gray
+    if ($defines) {
+        & $CLANG $BASFLAGS.Split(' ') @($defines) -c $src -o $o
+    } else {
+        & $CLANG $BASFLAGS.Split(' ') $src -o $o
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Error "asm failed: $src"; exit 1 }
+    Write-Host "LD  $elf" -ForegroundColor Gray
+    & $LDLD -T (Join-Path $BootDir "boot.ld") -o $elf $o
+    if ($LASTEXITCODE -ne 0) { Write-Error "link failed"; exit 1 }
+    Write-Host "OBJCOPY $bin" -ForegroundColor Gray
+    & $OBJCOPY -O binary $elf $bin
+    return $bin
+}
+# boot.bin  : ISO variant (El Torito no-emulation, loaded at 0x7C00)
+$bootBin   = Build-Boot (Join-Path $BootDir "boot.S") "boot" ""
+# stage2.bin: disk variant (DISK_BOOT, loaded by MBR to 0x20000)
+$stage2Bin = Build-Boot (Join-Path $BootDir "boot.S") "stage2" "-DDISK_BOOT"
+# mbr.bin   : minimal MBR with partition table (LBA 0)
+$mbrBin    = Build-Boot (Join-Path $BootDir "mbr.S") "mbr" ""
 
-# ---- disk image ----
+# ---- disk image (MBR + stage2 + kernel) ----
 $disk = Obj "disk.img"
 Write-Host "PACK $disk" -ForegroundColor Gray
-& $PYTHON (Join-Path $Root "tools/mkimage.py") $bootBin $kernBin $disk
+& $PYTHON (Join-Path $Root "tools/mkimage.py") $mbrBin $stage2Bin $kernBin $disk
 if ($LASTEXITCODE -ne 0) { Write-Error "pack failed"; exit 1 }
 
 Write-Host "Build OK -> $disk" -ForegroundColor Green
