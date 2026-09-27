@@ -44,6 +44,7 @@ K_OBJS := $(BUILD)/main.o \
           $(BUILD)/mm/slab.o \
           $(BUILD)/mm/paging.o \
           $(BUILD)/mm/elf.o \
+          $(BUILD)/lib/kstring.o \
           $(BUILD)/sched/sched.o \
           $(BUILD)/syscall/syscall.o \
           $(BUILD)/user/user_main.o \
@@ -54,11 +55,18 @@ K_OBJS := $(BUILD)/main.o \
           $(BUILD)/arch/x86_64/idt.o \
           $(BUILD)/arch/x86_64/isr.o \
           $(BUILD)/drivers/keyboard.o \
+          $(BUILD)/drivers/mouse.o \
+          $(BUILD)/drivers/bui.o \
+          $(BUILD)/drivers/bppg.o \
+          $(BUILD)/drivers/tcon.o \
+          $(BUILD)/drivers/desktop.o \
           $(BUILD)/drivers/ata.o \
           $(BUILD)/drivers/fb.o \
           $(BUILD)/drivers/dev.o \
           $(BUILD)/fs/berryfs.o \
           $(BUILD)/drivers/fbcon.o \
+          $(BUILD)/drivers/splash.o \
+          $(BUILD)/drivers/splash_logo.o \
           $(BUILD)/drivers/font8x8.o \
           $(BUILD)/arch/x86_64/pic.o \
           $(BUILD)/arch/x86_64/timer.o
@@ -73,7 +81,21 @@ BOOT_OBJ  := $(BUILD)/boot.o
 BOOT_ELF  := $(BUILD)/boot.elf
 BOOT_BIN  := $(BUILD)/boot.bin
 
+STAGE2_OBJ := $(BUILD)/stage2.o
+STAGE2_ELF := $(BUILD)/stage2.elf
+STAGE2_BIN := $(BUILD)/stage2.bin
+
+MBR_OBJ  := $(BUILD)/mbr.o
+MBR_ELF  := $(BUILD)/mbr.elf
+MBR_BIN  := $(BUILD)/mbr.bin
+
 DISK := $(BUILD)/disk.img
+
+# Kernel image size -> bootloader transfer length.  Recursive (`=`, not `:=`)
+# so the tools/kern_size.py probe runs at recipe time, once kernel.bin exists.
+# Without this the loader would use its 256 KiB fallback default.
+KERNEL_SECTORS = $(shell $(PY) tools/kern_size.py $(KERNEL_BIN))
+KERNEL_COPYB   = $(shell $(PY) tools/kern_size.py $(KERNEL_BIN) --bytes)
 
 # ---- cross-platform helpers ----
 # GnuWin32 make on Windows runs recipes via cmd.exe, so `mkdir -p` / `rm -rf`
@@ -86,7 +108,7 @@ MKDIR_P = @mkdir -p $(dir $@)
 RM_RF  = rm -rf $(BUILD)
 endif
 
-.PHONY: all run clean
+.PHONY: all run clean splashlogo
 
 all: $(DISK)
 
@@ -116,14 +138,38 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
 # ---- bootloader ----
-$(BOOT_OBJ): $(BOOT_DIR)/boot.S
+# boot.bin  : ISO variant (El Torito no-emulation, loaded at 0x7C00).  The copy
+#             length is injected so the loader moves the WHOLE kernel.
+$(BOOT_OBJ): $(BOOT_DIR)/boot.S $(KERNEL_BIN)
 	$(MKDIR_P)
-	$(AS) $(B_ASFLAGS) $< -o $@
+	$(AS) $(B_ASFLAGS) -DKERNEL_COPY_BYTES=$(KERNEL_COPYB) -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
 
 $(BOOT_ELF): $(BOOT_OBJ) $(BOOT_DIR)/boot.ld
 	$(LD) -T $(BOOT_DIR)/boot.ld -o $@ $(BOOT_OBJ)
 
 $(BOOT_BIN): $(BOOT_ELF)
+	$(OBJCOPY) -O binary $< $@
+
+# stage2.bin: disk variant (DISK_BOOT), read count injected as a sector total.
+$(STAGE2_OBJ): $(BOOT_DIR)/boot.S $(KERNEL_BIN)
+	$(MKDIR_P)
+	$(AS) $(B_ASFLAGS) -DDISK_BOOT -DKERNEL_COPY_BYTES=$(KERNEL_COPYB) -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
+
+$(STAGE2_ELF): $(STAGE2_OBJ) $(BOOT_DIR)/boot.ld
+	$(LD) -T $(BOOT_DIR)/boot.ld -o $@ $(STAGE2_OBJ)
+
+$(STAGE2_BIN): $(STAGE2_ELF)
+	$(OBJCOPY) -O binary $< $@
+
+# mbr.bin   : LBA 0 (partition table + stage2 loader)
+$(MBR_OBJ): $(BOOT_DIR)/mbr.S
+	$(MKDIR_P)
+	$(AS) $(B_ASFLAGS) $< -o $@
+
+$(MBR_ELF): $(MBR_OBJ) $(BOOT_DIR)/boot.ld
+	$(LD) -T $(BOOT_DIR)/boot.ld -o $@ $(MBR_OBJ)
+
+$(MBR_BIN): $(MBR_ELF)
 	$(OBJCOPY) -O binary $< $@
 
 # ---- user programs (M2: init + worker, each a separate ELF) ----
@@ -168,13 +214,18 @@ $(WORKER_ELF): $(USER_WORKER_OBJS) $(USER_DIR)/user.ld
 $(USER_C): $(INIT_ELF) $(WORKER_ELF) tools/embed_elf.py
 	$(PY) tools/embed_elf.py user_elf_init $(INIT_ELF) user_elf_worker $(WORKER_ELF) $(USER_C)
 
-# ---- disk image ----
-$(DISK): $(BOOT_BIN) $(KERNEL_BIN) tools/mkimage.py
-	$(PY) tools/mkimage.py $(BOOT_BIN) $(KERNEL_BIN) $(DISK)
+# ---- disk image (MBR + stage2 + kernel) ----
+$(DISK): $(MBR_BIN) $(STAGE2_BIN) $(KERNEL_BIN) tools/mkimage.py
+	$(PY) tools/mkimage.py $(MBR_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(DISK)
 
 # ---- vmdk (VMware) ----
 vmdk: $(DISK)
 	qemu-img convert -f raw -O vmdk $(DISK) $(BUILD)/berryos.vmdk
+
+# ---- regenerate the boot-splash wordmark asset (needs Python + Pillow) ----
+splashlogo:
+	$(PY) tools/make_splash_logo.py --src tools/assets/splash_logo.png \
+	  --out $(KERNEL_DIR)/drivers/splash_logo.c
 
 # ---- run ----
 run: $(DISK)

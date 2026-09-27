@@ -14,6 +14,7 @@
 .section .text
 .global _start
 .type _start, @function
+
 _start:
     cli
     movq $0x200000, %rsp        /* temporary kernel stack (identity-mapped) */
@@ -26,10 +27,10 @@ _start:
     xorq %rax, %rax
     rep stosq
 
-    /* Load VBE boot-info (written by boot.S in real mode) into registers for
-     * kmain.  The boot page tables are still active here, so low memory is
-     * identity-mapped and 0x6000 is directly readable.  Fields are stored as
-     * zero-extended qwords: {phys, width, height, pitch, bpp}. */
+    /* Load framebuffer boot-info (written by boot.S in real mode) into
+     * registers for kmain.  The boot page tables are still active here, so low
+     * memory is identity-mapped and 0x6000 is directly readable.  Fields are
+     * stored as zero-extended qwords: {phys, width, height, pitch, bpp}. */
     movq 0x6000, %rdi
     movq 0x6008, %rsi
     movq 0x6010, %rdx

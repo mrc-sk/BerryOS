@@ -9,6 +9,8 @@
  * non-commercial restriction terms that apply to this software.
  */
 #include "berryos.h"
+#include "tcon.h"
+#include "desktop.h"
 
 /* =====================================================================
  * PS/2 keyboard driver (M3).
@@ -16,8 +18,10 @@
  * The IRQ1 handler reads the scan code from port 0x60 and hands it to
  * kbd_handle_scan(), which decodes scan-code set 1 into ASCII, keeps a
  * currently-typed line with local editing (backspace), and commits it to
- * a ring buffer on Enter.  A user process blocked in sys_read() is woken
- * when a full line becomes available.
+ * a ring buffer on Enter.  Ctrl+letter yields the control code instead of
+ * the printable character, and Ctrl+X / Ctrl+C additionally commit the
+ * line -- see the comment on that branch.  A user process blocked in
+ * sys_read() is woken when a full line becomes available.
  *
  * Adapted from the earlier 32-bit BerryOS keyboard driver, reworked for
  * the 64-bit kernel: single keyboard owner, ring buffer + line editor,
@@ -40,6 +44,7 @@ static char  k_line[K_LINE_SZ];
 static int   k_line_len;
 
 static int   k_shift = 0;     /* shift currently held */
+static int   k_ctrl  = 0;     /* ctrl currently held */
 static int   k_caps  = 0;     /* capslock toggled */
 static int   k_ext   = 0;     /* mid 0xE0/0xE1 extended sequence */
 static int   k_wait  = 0;     /* tid blocked in sys_read (0 = none) */
@@ -96,10 +101,14 @@ static void ring_reset(void){
     k_rd = k_wr = k_count = 0;
 }
 
-/* Echo a character to both VGA and the serial console. */
+/* Echo a character: to the serial log always, and on screen either into the
+ * desktop's terminal surface (when the desktop owns the screen) or to the VGA
+ * text console.  Without the tcon branch, typing would be invisible: the shell
+ * only writes its OUTPUT through sys_write, and sys_write feeds tcon. */
 static void kbd_echo(char c){
-    vga_putc(c);
     serial_putc(c);
+    if (desktop_active()) tcon_putc(c);
+    else                  vga_putc(c);
 }
 
 /* Map a make scan-code to ASCII, applying shift + capslock. Returns 0
@@ -123,12 +132,14 @@ static void kbd_handle_scan(uint8_t sc){
         /* break code (key released) */
         uint8_t c = (uint8_t)(sc & 0x7F);
         if (c == 0x2A || c == 0x36) k_shift = 0;   /* shift up */
+        if (c == 0x1D) k_ctrl = 0;                 /* ctrl up */
         return;
     }
 
     /* make code (key pressed) */
     switch (sc){
         case 0x2A: case 0x36: k_shift = 1; return;       /* shift down */
+        case 0x1D: k_ctrl = 1; return;                   /* ctrl down */
         case 0x3A: k_caps ^= 1; return;                  /* capslock */
         case 0x0E:                                        /* backspace */
             if (k_line_len > 0){
@@ -148,6 +159,30 @@ static void kbd_handle_scan(uint8_t sc){
         default: break;
     }
 
+    /* Ctrl+letter -> the classic control code (a=0x01 .. z=0x1A) instead of
+     * the printable character, which is what makes editor key bindings such
+     * as Ctrl+X (save) / Ctrl+C (cancel) possible at all -- without this the
+     * driver simply typed a literal 'x'. */
+    if (k_ctrl){
+        char base = k_norm[sc];
+        if (base >= 'a' && base <= 'z'){
+            char ctl = (char)(base - 'a' + 1);
+            if (k_line_len < K_LINE_SZ - 1) k_line[k_line_len++] = ctl;
+            /* Ctrl+X and Ctrl+C also COMMIT the line.  sys_read() only
+             * returns on a newline, so without this the reader would sit
+             * blocked until the user also pressed Enter. */
+            if (ctl == 0x18 || ctl == 0x03){
+                int i;
+                for (i = 0; i < k_line_len; i++) ring_put(k_line[i]);
+                ring_put('\n');
+                k_line_len = 0;
+                kbd_echo('\r'); kbd_echo('\n');
+                if (k_wait) sched_wake_task(k_wait);
+            }
+        }
+        return;                     /* Ctrl + anything else: ignore */
+    }
+
     if (k_line_len < K_LINE_SZ - 1){
         char c = map_char(sc);
         if (c){
@@ -163,15 +198,13 @@ void keyboard_isr(void){
     kbd_handle_scan(inb(0x60));
 }
 
-static void keyboard_selftest(void);
-
 void keyboard_init(void){
     k_rd = k_wr = k_count = 0;
     k_line_len = 0;
-    k_shift = k_caps = k_ext = k_wait = 0;
+    k_shift = k_ctrl = k_caps = k_ext = k_wait = 0;
     pic_unmask(1);            /* enable IRQ1 */
 
-    keyboard_selftest();      /* exercise decode/ring path at boot */
+    /* keyboard_selftest();   -- disabled: debug */
 }
 
 void keyboard_set_waiter(int id){
@@ -184,6 +217,21 @@ int keyboard_available(void){
 
 int keyboard_dequeue(void){
     return ring_get();
+}
+
+/* Push text into the keyboard queue as if it had been typed, and wake a reader
+ * blocked in sys_read().  This is how a .bppg program's `run` script reaches
+ * the shell: the program is not given a private API, it is given the prompt.
+ * The ring holds 256 bytes, so keep injected scripts short. */
+void keyboard_inject(const char* s){
+    int nl = 0;
+    if (!s) return;
+    while (*s){
+        ring_put(*s);
+        if (*s == '\n') nl = 1;
+        s++;
+    }
+    if (nl && k_wait) sched_wake_task(k_wait);
 }
 
 /* Boot-time self-test: feed synthetic scan codes for "hi\n" through the

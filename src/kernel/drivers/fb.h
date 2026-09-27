@@ -37,7 +37,7 @@ struct framebuffer {
     uint32_t width;
     uint32_t height;
     uint32_t pitch;   /* bytes per scanline */
-    uint32_t bpp;     /* bits per pixel (expect 32) */
+    uint32_t bpp;     /* bits per pixel: 15 / 16 / 24 / 32 supported */
 };
 
 extern struct framebuffer g_fb;
@@ -49,10 +49,14 @@ void fb_bind(uint64_t phys, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bpp
 void fb_set_font(const uint8_t* font, int cw, int ch);
 
 void fb_put_pixel(int x, int y, uint32_t rgb);
+uint32_t fb_get_pixel(int x, int y);   /* read back as 0x00RRGGBB, any depth */
 void fb_fill_rect(int x, int y, int w, int h, uint32_t rgb);
 void fb_draw_rect(int x, int y, int w, int h, uint32_t rgb);  /* border only */
 void fb_clear(uint32_t rgb);
 void fb_draw_char(int x, int y, uint32_t fg, uint32_t bg, char c);
 void fb_draw_string(int x, int y, uint32_t fg, uint32_t bg, const char* s);
+void fb_draw_string_scaled(int x, int y, uint32_t fg, uint32_t bg, const char* s, int scale);
+uint32_t fb_width(void);
+uint32_t fb_height(void);
 
 #endif /* BERRYOS_FB_H */

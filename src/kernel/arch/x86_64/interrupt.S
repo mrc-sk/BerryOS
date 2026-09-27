@@ -123,7 +123,8 @@ isr_common:
     pushq %r14
     pushq %r15
 
-    movq  %rsp, %rdi         /* arg1: pointer to regs struct */
+    movq  %rsp, %rdi         /* rdi -> regs base (rax at offset 0) */
+
     call  isr_handler
 
     popq  %r15
@@ -145,3 +146,4 @@ isr_common:
     iretq
 
 .size isr_common, . - isr_common
+

@@ -81,3 +81,45 @@ long sys_mkfs(void){
 long sys_unlink(const char* path){
     return do_syscall(14, (long)path, 0, 0);
 }
+
+/* Shell introspection.  The kernel writes both memory figures into a
+ * caller-supplied 2-slot array, so the wrapper copies them out. */
+long sys_meminfo(unsigned long* total, unsigned long* free){
+    unsigned long v[2];
+    long r = do_syscall(18, (long)v, 0, 0);
+    if (r != 0) return r;
+    if (total) *total = v[0];
+    if (free)  *free  = v[1];
+    return 0;
+}
+long sys_tasks(char* buf, unsigned long n){
+    return do_syscall(19, (long)buf, (long)n, 0);
+}
+unsigned long sys_uptime(void){
+    return (unsigned long)do_syscall(20, 0, 0, 0);
+}
+
+/* M4+: graphics syscalls pack up to 5 args into a struct passed by pointer.
+ * Only rdi (already delivered by the call gate) is needed, so this is portable
+ * across compilers and avoids relying on r10/r8 register bindings. */
+struct gfx_args { long p[5]; };
+static struct gfx_args g_gfx;
+static inline long do_syscall_gfx(long num, long a, long b, long c, long d, long e){
+    g_gfx.p[0] = a; g_gfx.p[1] = b; g_gfx.p[2] = c; g_gfx.p[3] = d; g_gfx.p[4] = e;
+    return do_syscall(num, (long)&g_gfx, 0, 0);
+}
+
+void gfx_fill(int x, int y, int w, int h, unsigned int color){
+    do_syscall_gfx(15, (long)x, (long)y, (long)w, (long)h, (long)color);
+}
+void gfx_text(int x, int y, unsigned int fg, unsigned int bg, const char* s){
+    do_syscall_gfx(16, (long)x, (long)y, (long)fg, (long)bg, (long)s);
+}
+void gfx_clear(unsigned int color){
+    do_syscall(17, (long)color, 0, 0);
+}
+
+/* M5: drive the desktop window manager from the shell. */
+long sys_desktop(int op, char* buf, unsigned long n){
+    return do_syscall(21, (long)op, (long)buf, (long)n);
+}

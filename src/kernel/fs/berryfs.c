@@ -65,6 +65,17 @@ struct bfs_file {
 static uint8_t           g_sec[512];
 static struct bfs_file   g_fds[BFS_MAX_FD];
 
+/* Set by bfs_mount().  Everything below is a no-op unless a disk is present:
+ * sec_read()/sec_write() go straight to the ATA driver, and a FAILED read
+ * leaves g_sec holding whatever the previous operation put there.  Without
+ * this flag a diskless boot (e.g. from the ISO) reads stale buffer memory as
+ * the inode table -- which showed up as the same file being listed over and
+ * over, and as every O_CREAT allocating a fresh inode because inode_find()
+ * could never see the one it just wrote.  Better to fail honestly. */
+static int g_mounted = 0;
+
+int bfs_mounted(void){ return g_mounted; }
+
 /* ---- tiny local string/mem helpers (no libc) ---- */
 static int kstrcmp(const char* a, const char* b){
     while (*a && *a == *b){ a++; b++; }
@@ -145,6 +156,9 @@ static int inode_alloc(const char* name){
 void bfs_format(void){
     struct bfs_sb sb;
     int i;
+    /* Guarded on the DISK, not on g_mounted: bfs_mount() formats a present but
+     * unformatted disk before it flips g_mounted on. */
+    if (!ata_present()) return;
     kmemset(&sb, 0, sizeof(sb));
     sb.magic[0] = 'B'; sb.magic[1] = 'F'; sb.magic[2] = 'S'; sb.magic[3] = '1';
     sb.inode_count   = BFS_INODES;
@@ -163,8 +177,9 @@ void bfs_format(void){
 
 void bfs_mount(void){
     struct bfs_sb sb;
+    g_mounted = 0;
     if (!ata_present()){
-        serial_puts("[BFS] no disk: filesystem disabled\r\n");
+        serial_puts("[BFS] no disk: filesystem unavailable\r\n");
         return;
     }
     sec_read(BFS_SB_SECTOR, g_sec);
@@ -175,12 +190,14 @@ void bfs_mount(void){
     } else {
         serial_puts("[BFS] mounted (BerryFS)\r\n");
     }
+    g_mounted = 1;
     kmemset(g_fds, 0, sizeof(g_fds));
 }
 
 long bfs_open(const char* path, long flags){
     int ino;
     int fd;
+    if (!g_mounted) return -1;
     if ((int)flags & BFS_O_CREAT){
         ino = inode_find(path);
         if (ino < 0) ino = inode_alloc(path);
@@ -212,6 +229,7 @@ long bfs_write(long fd, const void* buf, unsigned long n){
     struct bfs_inode in;
     unsigned long done = 0;
     const uint8_t* src = (const uint8_t*)buf;
+    if (!g_mounted) return -1;
     if (fd < 0 || fd >= BFS_MAX_FD || !g_fds[fd].used) return -1;
     f = &g_fds[fd];
     inode_read(f->ino, &in);
@@ -246,6 +264,7 @@ long bfs_read(long fd, void* buf, unsigned long n){
     struct bfs_inode in;
     unsigned long done = 0;
     uint8_t* dst = (uint8_t*)buf;
+    if (!g_mounted) return -1;
     if (fd < 0 || fd >= BFS_MAX_FD || !g_fds[fd].used) return -1;
     f = &g_fds[fd];
     inode_read(f->ino, &in);
@@ -273,9 +292,11 @@ long bfs_close(long fd){
 }
 
 long bfs_unlink(const char* path){
-    int ino = inode_find(path);
+    int ino;
     struct bfs_inode in;
     int k;
+    if (!g_mounted) return -1;
+    ino = inode_find(path);
     if (ino < 0) return -1;
     inode_read(ino, &in);
     for (k = 0; k < BFS_DIRECT; k++)
@@ -288,7 +309,7 @@ long bfs_unlink(const char* path){
 long bfs_ls(char* buf, unsigned long n){
     int i;
     unsigned long pos = 0;
-    if (!buf || n == 0) return -1;
+    if (!g_mounted || !buf || n == 0) return -1;
     for (i = 0; i < BFS_INODES; i++){
         struct bfs_inode in;
         char digits[12];

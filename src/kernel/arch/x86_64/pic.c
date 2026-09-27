@@ -57,8 +57,17 @@ void pic_unmask(uint8_t irq){
         m &= (uint8_t)~(1u << irq);
         outb(PIC1_DATA, m);
     } else {
-        uint8_t m = inb(PIC2_DATA);
-        m &= (uint8_t)~(1u << (irq - 8));
-        outb(PIC2_DATA, m);
+        /* Slave line (IRQ8..15).  The slave is wired to the master through the
+         * cascade line IRQ2, which pic_init masks along with everything else.
+         * Clearing only the slave bit is not enough: while master IRQ2 is
+         * masked, *no* slave IRQ (mouse IRQ12, etc.) can ever reach the CPU.
+         * Unmask the cascade too, otherwise the device looks initialised but
+         * its interrupt never fires. */
+        uint8_t mm = inb(PIC1_DATA);
+        mm &= (uint8_t)~(1u << 2);          /* master: enable cascade (IRQ2) */
+        outb(PIC1_DATA, mm);
+        uint8_t ms = inb(PIC2_DATA);
+        ms &= (uint8_t)~(1u << (irq - 8));  /* slave: enable the requested line */
+        outb(PIC2_DATA, ms);
     }
 }

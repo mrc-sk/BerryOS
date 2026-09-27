@@ -34,6 +34,11 @@ static void user_enter(uint64_t entry, uint64_t user_rsp){
         serial_puts("[user] no memory for istack\r\n");
         sched_task_exit();
     }
+    {
+        unsigned char* p = (unsigned char*)istack;
+        uint32_t i;
+        for (i = 0; i < ISTACK_SIZE; i++) p[i] = 0xCC;  /* watermark sentinel */
+    }
     sched_set_istack(istack);
     tss_set_rsp0(istack + ISTACK_SIZE);
 

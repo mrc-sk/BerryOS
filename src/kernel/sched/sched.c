@@ -17,6 +17,22 @@ static void kmemcpy(void* dst, const void* src, size_t n){
     while (n--) *d++ = *s++;
 }
 
+/* ---- Part B: stack high-water watermark (stack-overflow verification) ----
+ * After allocating a stack we poison it with 0xCC.  As the task uses the
+ * stack (growing downward from the top) those bytes get overwritten.  The
+ * lowest non-0xCC byte therefore marks the deepest stack usage seen so far. */
+static void stack_fill_sentinel(uint64_t base, uint32_t size){
+    unsigned char* p = (unsigned char*)base;
+    uint32_t i;
+    for (i = 0; i < size; i++) p[i] = 0xCC;
+}
+static uint32_t stack_bytes_used(uint64_t base, uint32_t size){
+    const unsigned char* p = (const unsigned char*)base;
+    uint32_t i;
+    for (i = 0; i < size; i++) if (p[i] != 0xCC) break;
+    return i;   /* bytes from the bottom that have been touched */
+}
+
 /* First-run entry for forked children (defined in switch.S). */
 extern void child_resume_stub(void);
 
@@ -36,7 +52,7 @@ extern void child_resume_stub(void);
  * =================================================================== */
 
 #define TASK_MAX        32
-#define TASK_STACK_SIZE (16 * 1024)
+#define TASK_STACK_SIZE (32 * 1024)
 #define QUANTUM_DEFAULT 5            /* ticks (50 ms @100 Hz) */
 
 /* States */
@@ -61,6 +77,10 @@ struct task {
     void*           arg;
     uint64_t        stack;        /* task stack base (for freeing) */
     uint64_t        istack;       /* ring-0 trap stack (user tasks) */
+    uint64_t        istack_base;  /* watermark base (0 = no istack) */
+    uint32_t        istack_size;
+    uint32_t        max_stack;    /* peak kernel-task-stack usage (bytes) */
+    uint32_t        max_istack;   /* peak istack usage (bytes) */
     uint64_t        cr3;          /* per-process page-table base (phys) */
     int             parent;       /* parent task id (0 = none) */
     int             exit_code;    /* exit code when state == TASK_ZOMBIE */
@@ -212,7 +232,12 @@ int sched_create(void (*entry)(void*), void* arg, int prio, uint32_t quantum){
     t->entry      = entry;
     t->arg        = arg;
     t->stack      = stack;
+    stack_fill_sentinel(stack, TASK_STACK_SIZE);
     t->istack     = 0;
+    t->istack_base = 0;
+    t->istack_size = 0;
+    t->max_stack  = 0;
+    t->max_istack = 0;
     t->cr3        = paging_kernel_cr3();
     t->parent     = 0;
     t->exit_code  = 0;
@@ -247,12 +272,41 @@ void sched_start(void){
 /* Called from the PIT interrupt (isr.c): preemption driver. */
 void scheduler_tick(void){
     if (!current || current == idle) return;
+    /* Part B: sample the running task's peak stack usage at this instant. */
+    if (current->stack){
+        uint32_t u = stack_bytes_used(current->stack, TASK_STACK_SIZE);
+        if (u > current->max_stack) current->max_stack = u;
+    }
+    if (current->istack_base){
+        uint32_t u = stack_bytes_used(current->istack_base, current->istack_size);
+        if (u > current->max_istack) current->max_istack = u;
+    }
     if (current->ticks_left > 0){
         current->ticks_left--;
         if (current->ticks_left > 0) return;
     }
     /* slice exhausted -> reschedule */
     schedule();
+}
+
+/* Part B: dump peak stack usage for every task (stack-overflow verification).
+ * Call periodically from the idle loop to watch how much of each stack is
+ * actually consumed after the size increase. */
+void sched_report_usage(void){
+    int i;
+    serial_puts("[stack-wm] totals: kstack=");
+    serial_hex((uint64_t)TASK_STACK_SIZE);
+    serial_puts(" istack=");
+    serial_hex((uint64_t)ISTACK_SIZE);
+    serial_puts("\r\n");
+    for (i = 0; i < TASK_MAX; i++){
+        if (pool[i].state == TASK_EXITED && pool[i].id == 0) continue;
+        serial_puts("  id=");    serial_hex(pool[i].id);
+        serial_puts(" st=");     serial_hex(pool[i].state);
+        serial_puts(" kStack="); serial_hex(pool[i].max_stack);
+        serial_puts(" iStack="); serial_hex(pool[i].max_istack);
+        serial_puts("\r\n");
+    }
 }
 
 void sched_yield(void){
@@ -411,8 +465,10 @@ int sched_fork(struct regs* r){
 
     stack = (uint64_t)kmalloc(TASK_STACK_SIZE);
     if (!stack){ sti(); return -1; }
+    stack_fill_sentinel(stack, TASK_STACK_SIZE);
     istack = (uint64_t)kmalloc(ISTACK_SIZE);
     if (!istack){ kfree((void*)stack); sti(); return -1; }
+    stack_fill_sentinel(istack, ISTACK_SIZE);
     cr3 = pgdir_new();
     if (!cr3){ kfree((void*)stack); kfree((void*)istack); sti(); return -1; }
 
@@ -425,7 +481,14 @@ int sched_fork(struct regs* r){
     /* Copy the parent's trap stack verbatim; this becomes the child's own
      * ISTAK frame.  The child resumes in user mode at the parent's fork-return
      * point, so we zero its return register (rax = 0 => "I am the child"). */
-    kmemcpy((void*)istack, (void*)current->istack, ISTACK_SIZE);
+    /* Poison the child istack, then copy ONLY the active trap frame (the iret
+     * context) so the child resumes in ring 3.  The rest stays sentinel -- the
+     * watermark depends on it. */
+    {
+        uint64_t off = (uint64_t)r - current->istack;   /* frame offset in istack */
+        uint64_t len = ISTACK_SIZE - off;               /* frame size to copy */
+        kmemcpy((void*)(istack + off), (const void*)(uint64_t)r, len);
+    }
 
     /* Craft the child's FIRST kernel-stack frame.  When the scheduler first
      * dispatches the child, switch_to() returns into child_resume_stub, which
@@ -443,6 +506,10 @@ int sched_fork(struct regs* r){
     }
     child->stack  = stack;
     child->istack = istack;
+    child->istack_base = istack;
+    child->istack_size = ISTACK_SIZE;
+    child->max_stack  = 0;
+    child->max_istack = 0;
     child->cr3    = cr3;
 
     child->id         = next_id++;
@@ -543,7 +610,12 @@ void sched_wake_task(int id){
 }
 
 void sched_set_istack(uint64_t istack){
-    if (current) current->istack = istack;
+    if (current){
+        current->istack = istack;
+        current->istack_base = istack;
+        current->istack_size = ISTACK_SIZE;
+        current->max_istack = 0;
+    }
 }
 
 void sched_set_my_cr3(uint64_t cr3){
@@ -561,4 +633,65 @@ uint32_t sched_task_count(void){
     for (i = 0; i < TASK_MAX; i++)
         if (pool[i].state != TASK_EXITED && pool[i].id != 0) n++;
     return n;
+}
+
+/* ---- task table as text (shell `grove`) ----
+ * Buffered, bounds-checked emitters so a short caller buffer can never be
+ * overrun; same "returns bytes written, NUL-terminates" contract as bfs_ls(). */
+struct tk_out { char* buf; unsigned long n; unsigned long pos; };
+
+static void tk_str(struct tk_out* o, const char* s){
+    while (*s && o->pos + 1 < o->n) o->buf[o->pos++] = *s++;
+}
+
+/* Left-aligned unsigned decimal in a fixed field. */
+static void tk_u(struct tk_out* o, uint32_t v, int width){
+    char b[12];
+    int i = 11, len;
+    b[i--] = 0;
+    if (v == 0) b[i--] = '0';
+    while (v){ b[i--] = (char)('0' + (v % 10)); v /= 10; }
+    len = 10 - i;                       /* digits written */
+    tk_str(o, &b[i + 1]);
+    while (len < width){ tk_str(o, " "); len++; }
+}
+
+static void tk_pad(struct tk_out* o, const char* s, int width){
+    int len = 0;
+    const char* p = s;
+    while (*p++) len++;
+    tk_str(o, s);
+    while (len < width){ tk_str(o, " "); len++; }
+}
+
+long sched_tasks(char* buf, unsigned long n){
+    static const char* const st_names[] = {
+        "ready", "running", "blocked", "exited", "zombie"
+    };
+    struct tk_out o;
+    int i;
+
+    if (!buf || n == 0) return -1;
+    o.buf = buf; o.n = n; o.pos = 0;
+
+    tk_pad(&o, "id", 5);
+    tk_pad(&o, "prio", 7);
+    tk_pad(&o, "state", 10);
+    tk_pad(&o, "parent", 8);
+    tk_str(&o, "space\r\n");
+
+    for (i = 0; i < TASK_MAX; i++){
+        struct task* t = &pool[i];
+        const char* st;
+        if (t->id == 0 || t->state == TASK_EXITED) continue;
+        st = (t->state >= 0 && t->state <= 4) ? st_names[t->state] : "?";
+        tk_u(&o, t->id, 5);
+        tk_pad(&o, t->prio == PRIO_REALTIME ? "rt" : "norm", 7);
+        tk_pad(&o, st, 10);
+        tk_u(&o, (uint32_t)t->parent, 8);
+        tk_str(&o, (t->cr3 == paging_kernel_cr3()) ? "kernel" : "user");
+        tk_str(&o, "\r\n");
+    }
+    if (o.pos < n) buf[o.pos] = 0;
+    return (long)o.pos;
 }

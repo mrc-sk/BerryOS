@@ -13,12 +13,12 @@
  * SeaBIOS loads this 512-byte MBR to 0x7C00 only if it has a valid boot
  * signature AND an active partition entry, so we include a proper partition
  * table.  The MBR then reads the stage2 bootloader (LBA 1, one sector) into
- * 0x20000 and far-jumps to it.  stage2 (boot.S built with -DDISK_BOOT) loads
+ * 0x7000 and far-jumps to it.  stage2 (boot.S built with -DDISK_BOOT) loads
  * the kernel (LBA 2+) into 0x7E00 and enters long mode.
  *
  * Layout of build/disk.img:
  *   LBA 0 : this MBR (with partition table)
- *   LBA 1 : stage2 (512 bytes, at 0x20000)
+ *   LBA 1 : stage2 (512 bytes, at 0x7000)
  *   LBA 2+: raw kernel image (copied to 0x7E00 by stage2)
  */
 .code16

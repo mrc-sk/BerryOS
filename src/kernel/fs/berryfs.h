@@ -28,6 +28,7 @@
 
 void   bfs_mount(void);
 void   bfs_format(void);
+int    bfs_mounted(void);       /* 0 when no disk: every BF call fails then */
 long   bfs_open(const char* path, long flags);
 long   bfs_write(long fd, const void* buf, unsigned long n);
 long   bfs_read(long fd, void* buf, unsigned long n);

@@ -9,7 +9,10 @@
  * non-commercial restriction terms that apply to this software.
  */
 #include "berryos.h"
+#include "fb.h"
 #include "fbcon.h"
+#include "tcon.h"
+#include "desktop.h"
 
 /* =====================================================================
  * Syscall dispatch (M1 stage-4 "call gate").
@@ -34,10 +37,16 @@ static void serial_u64(uint64_t v){
 
 static uint64_t sys_write(uint64_t fd, const char* buf, uint64_t len){
     uint64_t i;
-    (void)fd;   /* only COM1 for now */
+    (void)fd;   /* stdout only: the serial log, plus the screen */
     for (i = 0; i < len; i++){
         serial_putc(buf[i]);
-        fbcon_putc((char)buf[i]);   /* also render to the framebuffer console */
+        /* The screen has two possible owners.  With the desktop running, text
+         * goes into the terminal surface and the desktop paints it into the
+         * Terminal window -- that is what made the shell movable/closable.
+         * Without a desktop (text mode, or no VBE mode) it still goes to the
+         * framebuffer console the old way. */
+        if (desktop_active()) tcon_putc((char)buf[i]);
+        else                  fbcon_putc((char)buf[i]);
     }
     return len;
 }
@@ -127,6 +136,91 @@ static uint64_t sys_read(uint64_t fd, char* buf, uint64_t len){
     return (uint64_t)got;
 }
 
+/* M4+: paint a rectangle from user space.
+ * uargs points at a 5-long user struct {x,y,w,h,color}.
+ *
+ * Where "the screen" is depends on who owns it:
+ *   - no desktop  -> the framebuffer, whole screen (the original behaviour)
+ *   - desktop, focused window is the Canvas  -> its offscreen surface
+ *   - desktop, anything else focused -> nowhere.  Drawing over the desktop
+ *     because a program asked for pixels would be worse than doing nothing,
+ *     and the Canvas window is one "pane open Canvas" away. */
+static int gfx_target(void){
+    int x, y, w, h;
+    if (!desktop_active()) return 0;
+    return desktop_canvas(&x, &y, &w, &h) ? 1 : -1;
+}
+
+static uint64_t sys_gfx_fill(uint64_t uargs){
+    const long* a = (const long*)uargs;
+    int ix = (int)a[0], iy = (int)a[1], iw = (int)a[2], ih = (int)a[3];
+    uint32_t color = (uint32_t)a[4];
+    int t = gfx_target();
+    if (t < 0) return 0;
+    if (t == 1){
+        desktop_canvas_fill(ix, iy, iw, ih, color);
+        return 0;
+    }
+    if (ix < 0){ iw += ix; ix = 0; }
+    if (iy < 0){ ih += iy; iy = 0; }
+    if (ix + iw > (int)fb_width())  iw = (int)fb_width()  - ix;
+    if (iy + ih > (int)fb_height()) ih = (int)fb_height() - iy;
+    if (iw <= 0 || ih <= 0) return 0;
+    fb_fill_rect(ix, iy, iw, ih, color);
+    return 0;
+}
+
+/* M4+: draw a string (scaled 2x for readability).
+ * uargs points at {x,y,fg,bg,strptr}. */
+static uint64_t sys_gfx_text(uint64_t uargs){
+    const long* a = (const long*)uargs;
+    const char* s = (const char*)a[4];
+    char buf[256];
+    int i, x, y, t;
+    if (!s) return 0;
+    for (i = 0; i < 255 && s[i]; i++) buf[i] = s[i];
+    buf[i] = 0;
+    x = (int)a[0];
+    y = (int)a[1];
+    t = gfx_target();
+    if (t < 0) return 0;
+    if (t == 1){
+        desktop_canvas_text(x, y, (uint32_t)a[2], (uint32_t)a[3], buf);
+        return 0;
+    }
+    fb_draw_string_scaled((uint32_t)x, (uint32_t)y, (uint32_t)a[2], (uint32_t)a[3], buf, 2);
+    return 0;
+}
+
+/* M4+: clear the target surface to a solid colour. */
+static uint64_t sys_gfx_clear(uint64_t color){
+    int t = gfx_target();
+    if (t < 0) return 0;
+    if (t == 1){ desktop_canvas_clear((uint32_t)color); return 0; }
+    fb_fill_rect(0, 0, fb_width(), fb_height(), (uint32_t)color);
+    return 0;
+}
+
+/* ---- shell introspection (so the shell can report on the machine) ----
+ * out[0] = total physical bytes, out[1] = free bytes.  User pointers are
+ * directly readable/writable here: user space lives in the same page tables
+ * the syscall runs under (see sys_gfx_fill). */
+static uint64_t sys_meminfo(uint64_t* out){
+    if (!out) return ~0ULL;
+    out[0] = pmm_total();
+    out[1] = pmm_free_bytes();
+    return 0;
+}
+
+static uint64_t sys_tasks(char* buf, uint64_t n){
+    return (uint64_t)sched_tasks(buf, (unsigned long)n);
+}
+
+/* System ticks since boot (PIT runs at 100 Hz). */
+static uint64_t sys_uptime(void){
+    return timer_ticks();
+}
+
 void syscall_dispatch(struct regs* r){
     switch (r->rax){
         case SYS_WRITE:
@@ -151,6 +245,8 @@ void syscall_dispatch(struct regs* r){
             r->rax = sys_read(r->rdi, (char*)r->rsi, r->rdx);
             break;
         case SYS_CLEAR:
+            if (desktop_active()) tcon_clear();
+            else                  fbcon_clear();
             vga_clear();
             r->rax = 0;
             break;
@@ -159,8 +255,38 @@ void syscall_dispatch(struct regs* r){
         case SYS_FREAD:  r->rax = bfs_read((long)r->rdi, (void*)r->rsi, (unsigned long)r->rdx); break;
         case SYS_CLOSE:  r->rax = bfs_close((long)r->rdi); break;
         case SYS_LS:     r->rax = bfs_ls((char*)r->rdi, (unsigned long)r->rsi); break;
-        case SYS_MKFS:   bfs_format(); r->rax = 0; break;
+        case SYS_MKFS:
+            /* Report failure when there is no disk to format, so the shell can
+             * say so rather than claiming success. */
+            if (!bfs_mounted()){ r->rax = ~0ULL; break; }
+            bfs_format();
+            r->rax = 0;
+            break;
         case SYS_UNLINK: r->rax = bfs_unlink((const char*)r->rdi); break;
+        case SYS_GFX_FILL:
+            r->rax = sys_gfx_fill(r->rdi);
+            break;
+        case SYS_GFX_TEXT:
+            r->rax = sys_gfx_text(r->rdi);
+            break;
+        case SYS_GFX_CLEAR:
+            r->rax = sys_gfx_clear(r->rdi);
+            break;
+        case SYS_MEMINFO:
+            r->rax = sys_meminfo((uint64_t*)r->rdi);
+            break;
+        case SYS_TASKS:
+            r->rax = sys_tasks((char*)r->rdi, r->rsi);
+            break;
+        case SYS_UPTIME:
+            r->rax = sys_uptime();
+            break;
+        case SYS_DESKTOP:
+            /* rdi = op, rsi = name/scratch buffer, rdx = its size.  Lets the
+             * shell drive the window manager ("pane open Terminal") without
+             * the kernel knowing anything about the command vocabulary. */
+            r->rax = (uint64_t)desktop_ctl((int)r->rdi, (char*)r->rsi, r->rdx);
+            break;
         default:
             r->rax = ~0ULL;   /* -1: unknown syscall */
             break;

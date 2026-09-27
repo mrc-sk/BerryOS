@@ -156,6 +156,7 @@ $kCFiles = @(
     (Join-Path $KernDir "mm/slab.c"),
     (Join-Path $KernDir "mm/paging.c"),
     (Join-Path $KernDir "mm/elf.c"),
+    (Join-Path $KernDir "lib/kstring.c"),
     (Join-Path $KernDir "sched/sched.c"),
     (Join-Path $KernDir "syscall/syscall.c"),
     (Join-Path $KernDir "user/user_main.c"),
@@ -167,11 +168,18 @@ $kCFiles = @(
     (Join-Path $KernDir "arch/x86_64/isr.c"),
     (Join-Path $KernDir "arch/x86_64/pic.c"),
     (Join-Path $KernDir "drivers/keyboard.c"),
+    (Join-Path $KernDir "drivers/mouse.c"),
+    (Join-Path $KernDir "drivers/bui.c"),
+    (Join-Path $KernDir "drivers/bppg.c"),
+    (Join-Path $KernDir "drivers/tcon.c"),
+    (Join-Path $KernDir "drivers/desktop.c"),
     (Join-Path $KernDir "drivers/ata.c"),
     (Join-Path $KernDir "drivers/fb.c"),
     (Join-Path $KernDir "drivers/dev.c"),
     (Join-Path $KernDir "fs/berryfs.c"),
     (Join-Path $KernDir "drivers/fbcon.c"),
+    (Join-Path $KernDir "drivers/splash.c"),
+    (Join-Path $KernDir "drivers/splash_logo.c"),
     (Join-Path $KernDir "drivers/font8x8.c"),
     (Join-Path $KernDir "arch/x86_64/timer.c")
 )
@@ -214,6 +222,17 @@ if ($LASTEXITCODE -ne 0) { Write-Error "link failed"; exit 1 }
 Write-Host "OBJCOPY $kernBin" -ForegroundColor Gray
 & $OBJCOPY -O binary $kernElf $kernBin
 
+# ---- kernel image size -> bootloader transfer length ----
+# The self-written bootloader has to be told how much kernel to move to
+# 0x100000; the length used to be a hardcoded 96 KiB and silently truncated
+# the image once it grew (the boot-splash wordmark alone is >100 KiB of
+# .rodata).  Measure the real kernel.bin instead.
+$kernBytes   = (Get-Item $kernBin).Length
+$kernSectors = [int](& $PYTHON (Join-Path $Root "tools/kern_size.py") $kernBin)
+if ($LASTEXITCODE -ne 0) { Write-Error "kern_size failed"; exit 1 }
+$kernCopyB   = $kernSectors * 512
+Write-Host ("  kernel image: {0} bytes -> {1} sectors ({2} bytes to load)" -f $kernBytes, $kernSectors, $kernCopyB) -ForegroundColor Gray
+
 # ---- bootloader ----
 function Build-Boot {
     param([string]$src, [string]$name, [string]$defines)
@@ -222,7 +241,7 @@ function Build-Boot {
     $bin = Obj "$name.bin"
     Write-Host "AS  $src ($name)" -ForegroundColor Gray
     if ($defines) {
-        & $CLANG $BASFLAGS.Split(' ') @($defines) -c $src -o $o
+        & $CLANG $BASFLAGS.Split(' ') @($defines.Split(' ')) -c $src -o $o
     } else {
         & $CLANG $BASFLAGS.Split(' ') $src -o $o
     }
@@ -235,9 +254,9 @@ function Build-Boot {
     return $bin
 }
 # boot.bin  : ISO variant (El Torito no-emulation, loaded at 0x7C00)
-$bootBin   = Build-Boot (Join-Path $BootDir "boot.S") "boot" ""
-# stage2.bin: disk variant (DISK_BOOT, loaded by MBR to 0x20000)
-$stage2Bin = Build-Boot (Join-Path $BootDir "boot.S") "stage2" "-DDISK_BOOT"
+$bootBin   = Build-Boot (Join-Path $BootDir "boot.S") "boot"   "-DKERNEL_COPY_BYTES=$kernCopyB -DKERNEL_SECTORS=$kernSectors"
+# stage2.bin: disk variant (DISK_BOOT, loaded by MBR into low memory)
+$stage2Bin = Build-Boot (Join-Path $BootDir "boot.S") "stage2" "-DDISK_BOOT -DKERNEL_COPY_BYTES=$kernCopyB -DKERNEL_SECTORS=$kernSectors"
 # mbr.bin   : minimal MBR with partition table (LBA 0)
 $mbrBin    = Build-Boot (Join-Path $BootDir "mbr.S") "mbr" ""
 

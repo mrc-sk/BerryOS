@@ -40,4 +40,23 @@ long sys_ls(char* buf, unsigned long n);
 long sys_mkfs(void);
 long sys_unlink(const char* path);
 
+/* Shell introspection: let the shell report memory, tasks and uptime without
+ * the kernel having to print anything itself. */
+long sys_meminfo(unsigned long* total, unsigned long* free);
+long sys_tasks(char* buf, unsigned long n);
+unsigned long sys_uptime(void);
+
+/* M4+: user-space graphics (draw into the framebuffer).  With the desktop
+ * running, "the framebuffer" for a user program is the client area of the
+ * focused window: coordinates are relative to it and outside it is clipped. */
+void gfx_fill(int x, int y, int w, int h, unsigned int color);
+void gfx_text(int x, int y, unsigned int fg, unsigned int bg, const char* s);
+void gfx_clear(unsigned int color);
+
+/* M5: desktop window manager control.  op values MUST match desktop.h. */
+#define DESK_LIST  1
+#define DESK_OPEN  2
+#define DESK_CLOSE 3
+long sys_desktop(int op, char* buf, unsigned long n);
+
 #endif /* BERRYOS_USER_SYSCALL_H */

@@ -10,13 +10,20 @@
  */
 /* BerryOS self-written bootloader (x86_64).
  *
- * Boot method: El Torito *no-emulation*.  The ISO boot image is the combined
- * (boot sector + raw kernel); the BIOS loads the whole thing into RAM at
- * 0x7C00 (boot sector) and 0x7E00 (kernel).  No int 0x13 disk reads are
- * needed here, which sidesteps floppy-emulation geometry/drive pitfalls.
+ * This one source assembles into TWO boot loaders:
  *
- * Flow (all in one 512-byte boot sector, loaded by BIOS at 0x7C00):
- *   1. 16-bit real mode: kernel is already at 0x7E00 (BIOS-loaded).
+ *   default      ISO variant -- El Torito *no-emulation*.  The ISO boot image
+ *                is the combined (boot sector + raw kernel); the BIOS loads the
+ *                whole thing into RAM at 0x7C00 (boot sector) and 0x7E00
+ *                (kernel).  No int 0x13 disk reads are needed, which sidesteps
+ *                floppy-emulation geometry/drive pitfalls.
+ *                Built as build/boot.bin, loaded by the BIOS at 0x7C00.
+ *   -DDISK_BOOT  raw hard disk / USB variant ("stage2").  The MBR only reads
+ *                this one sector, so it must fetch the kernel (LBA 2+) itself.
+ *                Built as build/stage2.bin, loaded by the MBR at 0x7000.
+ *
+ * Flow:
+ *   1. 16-bit real mode: kernel at 0x7E00 (BIOS-preloaded / int 0x13 read).
  *   2. 16-bit -> 32-bit protected mode (flat GDT)
  *   3. 32-bit: build identity page tables (1GB pages, low 4GB + high half)
  *   4. 32-bit -> 64-bit long mode (PAE + EFER.LME + CR0.PG)
@@ -25,6 +32,26 @@
  *
  * Assembled with the LLVM integrated assembler (clang -target x86_64-none-elf).
  */
+
+/* ---- how much kernel to transfer (injected by the build) -------------------
+ * The loader must move the WHOLE kernel image up to 0x100000.  This length
+ * used to be hardcoded (0x18000 = 96 KiB), which silently truncated the image
+ * the moment it grew past that -- adding the boot-splash wordmark (>100 KiB of
+ * read-only data) pushed kernel.bin to ~170 KiB, so everything past 96 KiB
+ * stayed zero and rendered as garbage.
+ *
+ * build.ps1 / Makefile now measure the real kernel.bin and pass the exact
+ * values (via tools/kern_size.py).  The defaults below keep a hand assembly
+ * working even without the -D, at the cost of copying a little zero padding --
+ * over-reading is harmless because the extra bytes land at/after the kernel's
+ * .bss, which start.S zeroes before kmain() runs.
+ * ------------------------------------------------------------------------- */
+#ifndef KERNEL_COPY_BYTES
+#define KERNEL_COPY_BYTES 0x40000      /* fallback: transfer 256 KiB */
+#endif
+#ifndef KERNEL_SECTORS
+#define KERNEL_SECTORS 512             /* fallback: 256 KiB / 512-byte sectors */
+#endif
 
 .code16
 #ifdef DISK_BOOT
@@ -45,66 +72,107 @@ _start:
     movw %ax, %ss
     movw $0x0600, %sp          /* stack grows down from 0x600 (away from boot code & kernel) */
 
-    /* --- Kernel image source (two boot paths) ---
-     *  a) El Torito *no-emulation* ISO: the BIOS loads (boot+kernel) into
-     *     RAM (kernel at 0x7E00); there is no boot disk, so the int 0x13
-     *     read below fails (CF=1) on the first sector and we fall through,
-     *     using the kernel that is already in RAM.
-     *  b) raw hard disk / USB: the BIOS only loaded the 512-byte boot
-     *     sector; we must read the kernel (LBA 1+) into 0x7E00 ourselves.
-     * We always attempt the read; on failure we simply keep what is in RAM.
-     * The loop stops at the first failed sector (end of image / no disk). */
+    /* --- Kernel image source (two boot paths) ----------------------------
+     *  a) El Torito *no-emulation* ISO: the BIOS has ALREADY loaded the whole
+     *     boot image (boot sector + raw kernel) into RAM -- the kernel sits at
+     *     0x7E00 and there is nothing left to read.
+     *
+     *     We deliberately do NOT probe a disk here.  An earlier revision did,
+     *     "just in case", but that is actively unsafe: on a machine that boots
+     *     from CD *and* has a hard disk attached, drive 0x80 is the hard disk,
+     *     so the read succeeds and lands on top of the kernel the BIOS just
+     *     placed in RAM.  tools/make_iso.py never writes the boot image to
+     *     LBA 1 of the ISO either, so such a read has no legitimate use.
+     *
+     *  b) raw hard disk / USB: the BIOS only loaded this 512-byte boot sector
+     *     (stage2, in this variant); we fetch the kernel ourselves from LBA 2
+     *     (LBA 0 = MBR, LBA 1 = stage2).
+     * -------------------------------------------------------------------- */
+#ifdef DISK_BOOT
     movb $0x80, %dl              /* raw hard disk drive number */
     movw $dap, %si               /* ds:si -> DAP (ds = 0) */
-    movw $0x07E0, %ax
-    movw %ax, %es
-    xorw %bx, %bx
-#ifdef DISK_BOOT
+    /* Read the kernel one 512-byte sector at a time.  int13 AH=42h takes the
+     * buffer address from the DAP, not from es:bx, so the buffer is pinned at
+     * OFFSET 0 and only the SEGMENT advances by one 0x20-paragraph sector: a
+     * >64 KiB image then never needs a wrapped bx, and the loop stays small
+     * enough to fit inside the 512-byte sector (see the .org asserts below).
+     * The destination (0x7E00 + KERNEL_SECTORS*512) must stay clear of the
+     * EBDA at 0x9FC00 -- tools/kern_size.py enforces that at build time. */
+    movw $0x07E0, %bx            /* buffer segment cursor: bx:0 = 0x7E00 */
     movw $2, %di                 /* disk: LBA0=MBR, LBA1=stage2, kernel at LBA2 */
-#else
-    movw $1, %di                 /* ISO: kernel at LBA1 (after boot sector) */
-#endif
 load_loop:
     movw %di, dap + 8            /* DAP LBA low field */
-    movw %bx, dap + 4            /* DAP buffer offset (advance with bx) */
+    movw %bx, dap + 6            /* DAP buffer segment (offset field stays 0) */
     movb $0x42, %ah
     int  $0x13
-#ifdef DISK_BOOT
-    jc   disk_fail               /* disk: a failed read is fatal (no kernel in RAM) */
-#else
-    jc   skip_disk               /* ISO: fail -> kernel already in RAM */
-#endif
-    addw $0x200, %bx             /* advance buffer offset (kernel < 64 KiB, single block) */
+    jc   disk_fail               /* a failed read is fatal (no kernel in RAM) */
+    movw %bx, %es                /* mirror the segment for BIOSes that look at es */
+    addw $0x20, %bx              /* advance the buffer by one 512-byte sector */
     incw %di
-#ifdef DISK_BOOT
-    cmpw $106, %di               /* read LBA 2..105 (104 sectors >= kernel size) */
-#else
-    cmpw $257, %di               /* LBA 1..256 */
-#endif
+    cmpw $(2 + KERNEL_SECTORS), %di   /* LBA 2 .. 1+KERNEL_SECTORS (whole image) */
     jne  load_loop
-skip_disk:
-    /* --- VBE: set a 1024x768x32 linear-framebuffer (mode 0x4119) ---
-     * QEMU's standard VGA (Bochs VBE) supports this LFB mode.  On success we
-     * query the mode info for the framebuffer physical address and stash
-     * {phys, 1024, 768, 4096, 32} at 0x6000 for the kernel to read in long
-     * mode.  On failure the fields stay zero -> text-mode fallback. */
-    movw $0x4119, %bx
-    movw $0x4F02, %ax
+#endif
+    /* --- VBE: pick a 32bpp LFB mode, then read the REAL geometry ----------
+     * Portable path: standard VESA BIOS Extensions via int 0x10, which works
+     * on QEMU, VirtualBox, VMware and real hardware booted in legacy/CSM mode.
+     * (A pure-UEFI box has no VBE int 0x10 at all and needs a GOP bootloader;
+     * that is a separate piece of work.)
+     *
+     * We deliberately do NOT hardcode the resulting geometry.  A VBE is free to
+     * answer with something other than what we asked for -- QEMU's SeaBIOS, for
+     * example, accepts the mode but reports its own 1280x1024 RGB555 surface --
+     * and assuming "1024x768x32" there is exactly what produced the garbled,
+     * striped display.  So we stash whatever the BIOS actually reports and let
+     * the kernel render to that bpp (see fb.c: fb_put_pixel). */
+    movw $0x0500, %cx        /* es = 0x500 -> mode info block at 0x5000 */
+    movw %cx, %es
+    movw $vbe_modes, %si
+vbe_try:
+    movw (%si), %bx          /* next candidate mode; 0 marks end of list */
+    testw %bx, %bx
+    jz   vbe_done
+    addw $2, %si
+    movw $0x4F02, %ax        /* VBE: set mode */
     int  $0x10
     cmpw $0x4F, %ax
-    jne  vbe_done
-    movw $0x0500, %cx      /* es = 0x500: mode-info buffer at 0x5000 */
-    movw %cx, %es
+    jne  vbe_try
     xorw %di, %di
-    movw $0x4F01, %ax      /* get VBE mode info */
+    movw $0x4F01, %ax        /* VBE: get mode info for the mode just set */
     movw %bx, %cx
     int  $0x10
-    movl 0x5028, %eax      /* PhysBasePtr (offset 0x28) */
-    movl %eax, 0x6000
-    movl $1024, 0x6008     /* width  */
-    movl $768,  0x6010     /* height */
-    movl $4096, 0x6018     /* pitch = 1024 * 4 */
-    movl $32,   0x6020     /* bpp    */
+    cmpw $0x4F, %ax
+    jne  vbe_try
+    testb $0x80, 0x5000      /* ModeAttributes bit7: linear framebuffer */
+    jz   vbe_try
+    movl 0x5028, %eax        /* PhysBasePtr */
+    testl %eax, %eax
+    jz   vbe_try
+
+    /* Accepted: stash the real geometry at 0x6000 for the kernel. */
+    movl %eax, 0x6000        /* phys   */
+    xorl %eax, %eax
+    movw 0x5012, %ax         /* XResolution */
+    movl %eax, 0x6008        /* width  */
+    xorl %eax, %eax
+    movw 0x5014, %ax         /* YResolution */
+    movl %eax, 0x6010        /* height */
+    movl 0x5040, %eax        /* LinBytesPerScanLine (VBE 2.0+) */
+    testl %eax, %eax
+    jnz  pitch_ok
+    xorl %eax, %eax
+    movw 0x5010, %ax         /* fallback: BytesPerScanLine */
+pitch_ok:
+    movl %eax, 0x6018        /* pitch  */
+    xorl %eax, %eax
+    movb 0x5019, %al         /* BitsPerPixel */
+    movl %eax, 0x6020        /* bpp    */
+    jmp  vbe_done
+
+vbe_modes:                   /* candidate modes, best first, 0-terminated */
+    .word 0x411B             /* 1024x768x32 */
+    .word 0x4117             /*  800x600x32 */
+    .word 0x4113             /*  640x480x32 */
+    .word 0x0000
 vbe_done:
 
     /* Load GDT and switch to protected mode */
@@ -173,8 +241,12 @@ long_mode:
     movw %ax, %ss
     movq $0x90000, %rsp
 
-    /* Copy kernel: 256 sectors (0x20000 bytes) from 0x7E00 to 0x100000 */
-    movq $0x20000, %rcx
+    /* Copy kernel from 0x7E00 (BIOS-preloaded for ISO / disk-read for raw disk)
+     * to 0x100000, then jump to it.  The length is the REAL image size, injected
+     * by the build and rounded up to a whole sector -- copying the complete
+     * image is what makes large read-only data (e.g. the boot-splash wordmark)
+     * actually present in memory. */
+    movq $KERNEL_COPY_BYTES, %rcx
     movq $0x7E00, %rsi
     movq $0x100000, %rdi
     rep  movsb
@@ -188,15 +260,10 @@ long_mode:
     orq  $0x200, %rax        /* CR4.OSFXSR */
     movq %rax, %cr4
 
-    /* DEBUG marker: emit 'K' on COM1 just before entering the kernel, so we
-     * can tell from the serial capture whether control reached the kernel. */
-    movw $0x3F8, %dx
-    movb $'K', %al
-    outb %al, %dx
-
     movabsq $0x100000, %rax
     jmp  *%rax
 
+#ifdef DISK_BOOT
 disk_fail:
     movw $0x3F8, %dx
     movb $'E', %al
@@ -212,6 +279,7 @@ disk_fail:
     outb %al, %dx
     hlt
     jmp  disk_fail
+#endif
 
 .align 8
 gdt:
@@ -241,7 +309,7 @@ dap:
     .byte 0                     /* reserved */
     .word 1                     /* sectors per read (updated per iteration) */
     .word 0x0000                /* offset   (0x07E0:0x0000 = 0x7E00) */
-    .word 0x07E0                /* segment */
+    .word 0x07E0                /* segment (0x07E0:0x0000 = 0x7E00) */
     .long 1                     /* LBA low  (start sector 1) */
     .long 0                     /* LBA high */
 

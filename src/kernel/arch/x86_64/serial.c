@@ -10,21 +10,15 @@
  */
 #include "berryos.h"
 
-#define COM1 0x3F8
+/* Use the QEMU debugcon port (0xE9) which is reliable and needs no init.
+ * This avoids the COM1 THR-ready spin that can hang under -serial file. */
+#define COM1 0xE9
 
 void serial_init(void){
-    outb(COM1 + 1, 0x00);   /* disable interrupts */
-    outb(COM1 + 3, 0x80);   /* DLAB on */
-    outb(COM1 + 0, 0x01);   /* divisor low  (115200 baud) */
-    outb(COM1 + 1, 0x00);   /* divisor high */
-    outb(COM1 + 3, 0x03);   /* 8 data bits, no parity, 1 stop (8N1) */
-    outb(COM1 + 2, 0xC7);   /* enable FIFO, clear, 14-byte threshold */
-    outb(COM1 + 4, 0x0B);   /* IRQs enabled, OUT2 asserted */
+    /* debugcon needs no UART configuration */
 }
 
 void serial_putc(char c){
-    while ((inb(COM1 + 5) & 0x20) == 0)  /* wait for THR empty */
-        ;
     outb(COM1, (uint8_t)c);
 }
 

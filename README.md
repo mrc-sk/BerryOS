@@ -1,7 +1,8 @@
 # BerryOS
 
 自研混合内核 + 多架构（x86_64 / ARM64 / RISC-V）+ 自研图形栈的图形化操作系统。
-**M3「图形点亮」已完成**：VBE 帧缓冲 + GUI 任务 + PS/2 鼠标已在 QEMU / VirtualBox 跑通。
+**M5「桌面闭环」已完成**：Bui 声明式界面语言 + 全屏窗口管理器 + `.bppg` 文本可执行程序，
+shell 本身一行未改就搬进了桌面上的 Terminal 窗口。整套东西在 QEMU / VirtualBox 跑通。
 
 > 想先看看效果？仓库内 `tools/make_video.py` 可生成 2 分钟的项目介绍视频
 > （含实机操作演示），产物为 `build/BerryOS_intro.mp4`。
@@ -23,9 +24,12 @@ Restriction*）。
 
 详见 [`LICENSE`](./LICENSE)。
 
-> 当前进度：**M3 已完成（图形点亮）** — VBE 帧缓冲 + GUI 任务已经在 QEMU 里跑通，
-> 屏幕下半部分是带窗口 / 按钮 / 鼠标光标的图形界面，**点一下 "Click +1" 按钮计数就会 +1**。
-> - M3 ✅ 图形点亮：标准 VBE（`int 0x10`）多模式回退 + bpp 自适应帧缓冲 + GUI 任务 + PS/2 鼠标
+> 当前进度：**M5 已完成（桌面闭环）** — 整屏是一张桌面：壁纸、图标列、任务栏，
+> 命令行 shell 活在一个可拖动、可置顶、可关闭的 Terminal 窗口里；界面用 `Bui` 文本描述，
+> 可执行程序是 `.bppg` 文本文件。旧的"上半屏控制台 + 下半屏按钮"分屏 demo 已被整体替换。
+> - M5 ✅ 桌面闭环：Bui 渲染层 + 声明式界面语言、全屏 WM、`.bppg` 文本程序、Canvas 离屏画布
+> - M4 ✅ 设备框架 + BerryFS 持久化文件系统；shell 果园命令语言 + 命令包
+> - M3 ✅ 图形点亮：标准 VBE（`int 0x10`）多模式回退 + bpp 自适应帧缓冲 + PS/2 鼠标
 > - M2 ✅ 起步：用户态最小 libc（syscall 封装 + C 用户程序）已在 QEMU 验证
 > - M1 ✅ 阶段一：中断子系统（GDT/IDT/异常/PIC/PIT）
 > - M1 ✅ 阶段二：物理内存管理（伙伴系统 + slab）+ 内核页表重建 + map_page/unmap_page
@@ -49,10 +53,11 @@ Restriction*）。
 | 内存管理 | 伙伴系统 + slab |
 | 调度 | 混合调度（实时 + 公平） |
 | IPC | 多机制并存 |
-| 图形 | 标准 VBE 帧缓冲 + GUI 任务（M3 已点亮；compositor 在 M4 演进） |
+| 图形 | 标准 VBE 帧缓冲 + 全屏桌面 WM（M3 点亮 / M5 桌面闭环；compositor 后续演进） |
 | 加速 | 2D 软渲染 + 预留 3D 接口 |
-| 文件系统 | 自研简单 FS |
-| 窗口 | 混合/可切换（浮动 + 平铺） |
+| 文件系统 | 自研简单 FS（BerryFS） |
+| 界面描述 | Bui 声明式文本语言；可执行程序为 `.bppg` 文本包 |
+| 窗口 | 浮动窗口 + 任务栏（平铺/多虚拟桌面后续演进） |
 | 输入 | 多输入设备（键鼠 + 触摸） |
 | 交付 | ISO / raw 镜像 + SDK + 文档 |
 
@@ -77,15 +82,20 @@ BerryOS/
       syscall/syscall.c     int 0x80 系统调用分发
       user/                 用户进程宿主（user_main / user_elf）
       drivers/
-        fb.c                帧缓冲核心：bpp 自适应 put/get pixel、矩形、字符
-        fbcon.c             帧缓冲文本控制台（支持 viewport 分区）
-        gui.c               M3 GUI 任务：窗口 + 按钮 + 鼠标光标
+        fb.c                帧缓冲核心：bpp 自适应 put/get pixel、矩形（按行打包）、字符
+        fbcon.c             帧缓冲文本控制台（无 VBE 时兜底）
+        desktop.c           全屏窗口管理器（M5）：壁纸/图标/任务栏/拖动/分区重绘
+        bui.c               Bui 渲染层 + 声明式界面语言（唯一知道裁剪矩形的地方）
+        bppg.c              .bppg 文本可执行程序：解析 / 加载 / 序列化
+        tcon.c              终端文本面：sys_write 的落点，桌面把它画进 Terminal 窗口
         mouse.c             PS/2 鼠标驱动
-        keyboard.c          键盘驱动
+        keyboard.c          键盘驱动（含 Ctrl、keyboard_inject）
+        splash.c            开机字标
         ata.c               ATA 磁盘驱动
         dev.c               设备框架
         font8x8.c           8x8 点阵字体
       fs/berryfs.c          BerryFS 简单文件系统
+      lib/kstring.c         memcpy/memmove/memset/memcmp（-nostdlib 下必须自带）
       arch/x86_64/
         start.S, kernel.ld  长模式入口、链接脚本
         serial.c, vga.c     串口与 VGA 文本输出
@@ -108,14 +118,16 @@ BerryOS/
   tools/
     make_iso.py             生成 El Torito no-emulation ISO
     mkimage.py              打包 raw 磁盘镜像
+    kern_size.py            量内核真实大小，注入 -DKERNEL_COPY_BYTES 并做低内存护栏
+    make_splash_logo.py     把 PNG 量化成 8bpp 调色板 C 数组（开机字标）
     setup_toolchain.py      一键安装工具链
     make_video.py           生成项目介绍视频
     check_vga.py            验证 VGA 文本输出
     screenshot.py           无窗口截图验证
+    desktop_smoke.py        M5 桌面验证：像素 + 键盘 + 真鼠标三类断言
+    desktop_probe.py        逐步输入 + 逐帧读数（排查用）
+    shell_smoke.py          驱动 shell 跑完整命令序列并断言转录
   build/                    构建产物（gitignore）
-    grab_iso.py             无窗口启动 + 抓帧
-    grab_mouse.py           注入鼠标移动并验证光标
-    grab_click.py           注入点击并验证按钮计数
 ```
 
 ## 构建与运行
@@ -156,11 +168,10 @@ BerryOS/
 
 4. 无窗口验证（适合 QEMU 窗口打不开 / 闪退，或做 CI）：
    ```powershell
-   python build/grab_iso.py       # 无窗口启动 + 抓帧 -> build/*.png
-   python build/grab_mouse.py     # 注入鼠标移动，验证光标跟随
-   python build/grab_click.py     # 注入点击，验证 Click +1 计数递增
-   python tools/check_vga.py      # 串口 + VGA 文本内存检查
-   python tools/screenshot.py     # 生成 build\berryos-screen.png
+   python tools/desktop_smoke.py    # 无窗口启动 + 像素/键盘/鼠标断言 -> build/desktop_smoke/
+   python tools/shell_smoke.py      # 驱动 shell 跑完整命令序列 -> build/shell_smoke/
+   python tools/check_vga.py        # 串口 + VGA 文本内存检查
+   python tools/screenshot.py       # 生成 build\berryos-screen.png
    ```
 
 ### 生成可启动 ISO（El Torito no-emulation）
@@ -319,24 +330,231 @@ VBoxManage startvm BerryOS
 - **屏幕分区（`drivers/fbcon.c` + `main.c`）**：上半屏 `[0, h/2)` 给帧缓冲控制台，
   下半屏 `[h/2, h)` 给 GUI 任务。两者**不再共用同一片像素**，彻底消除此前的
   光标拖影与闪烁。
-- **GUI 任务（`drivers/gui.c`）**：一个带标题栏的窗口 + `Click +1` 按钮 + 计数显示，
-  输入来自 **PS/2 鼠标**（`drivers/mouse.c`）。在窗口内点一下按钮，计数立即 +1。
+  > M5 起这套分屏已被**桌面**取代（见下文）：整屏归桌面，控制台不再是屏幕的一块，
+  > `fbcon` 只在拿不到 VBE 模式时兜底。
+- **GUI 任务（`drivers/gui.c`，M5 起为 `drivers/desktop.c`）**：一个带标题栏的窗口 +
+  `Click +1` 按钮 + 计数显示，输入来自 **PS/2 鼠标**（`drivers/mouse.c`）。
   任务空闲时 `hlt()` 等待中断，不忙等。
 
 自检与验证：
 
 ```powershell
-powershell -File run.ps1 -Headless   # 无窗口启动
-python build/grab_iso.py             # 抓帧，确认桌面 + 窗口已绘制
-python build/grab_mouse.py           # 注入鼠标移动，确认光标跟随
-python build/grab_click.py           # 注入点击，确认计数 0 -> 1
+powershell -File run.ps1 -Headless    # 无窗口启动
+python tools/desktop_smoke.py         # 抓帧 + 像素/键盘/鼠标断言（M5 起取代 grab_*.py）
+python tools/desktop_smoke.py iso     # 同上，对 ISO 启动
 ```
+
+> M3 时期用的 `build/grab_iso.py` / `grab_mouse.py` / `grab_click.py` 已随分屏 demo
+> 一起退役，能力并入 `tools/desktop_smoke.py`（见下文 M5 一节）。
 
 > 踩坑记录：
 > - **鼠标完全不动**：`pic_init()` 把所有主片 IRQ 都屏蔽了，包括级联用的 **IRQ2**；
 >   从片（IRQ8-15，鼠标在 IRQ12）必须先把主片 IRQ2 打开才能送达。
 > - **用户态缺页导致内核 panic**：ring-3 程序的一个空指针就把整个系统打挂。现在
 >   `#PF` 发生在用户态时只 `sched_exit()` 杀掉该进程，内核继续调度。
+
+## BerryOS Shell（命令语言）
+
+shell 是用户态程序 `user/init.c`（pid 1），通过阻塞式 `sys_read()` 读键盘。
+
+**设计取向：刻意不用 Unix / Windows 的命令名。** Unix 那套缩写（`ls`/`cat`/`rm`）
+是早期终端窄、打字慢留下的包袱，新系统没有这个包袱。这里改成两个决定：
+
+1. **果园隐喻词汇** —— 和 BerryOS 的名字呼应，一眼能看出不是 Unix 也不是 Windows。
+2. **最小唯一前缀（DCL/VMS 式）** —— 每个命令都能缩到唯一前缀：`bas` 就是
+   `basket`，`roo` 就是 `roots`。前缀撞车时**报出候选**而不是猜，例如
+   `s` → `ambiguous: 's' could be say sprout sap season`。
+
+| 命令 | 作用 | 对应 Unix |
+|---|---|---|
+| `basket` | 列出 BerryFS 里的文件 | `ls` |
+| `taste <f>` | 读文件 | `cat` |
+| `plant <f> <text>` | 写文件 | `echo >` |
+| `uproot <f>` | 删除文件 | `rm` |
+| `till` | 格式化 BerryFS | `mkfs` |
+| `say <text>` | 输出文本 | `echo` |
+| `sprout` | fork+exec+wait worker | — |
+| `wipe` | 清屏 | `clear` |
+| `roots` | 系统信息 | `uname` |
+| `bloom` | 图形演示 | — |
+| `dormant` | 关机 | `halt` |
+| `sap` | 内存用量 | `free` |
+| `grove` | 任务列表 | `ps` |
+| `season` | 运行时长 | `uptime` |
+| `weave` / `unweave` | 编写 / 删除命令包 | — |
+| `pane [open\|close]` | 桌面窗口与应用（M5） | — |
+| `?` | 帮助 | `help` |
+
+> M5 起 shell 运行在**桌面上的 Terminal 窗口**里；`sys_write()` 的输出先进终端文本面，
+> 再由桌面画进窗口，所以 shell 本身没有为"进窗口"改过一行。详见下文 M5 一节。
+
+`sap` / `grove` / `season` 建立在三个新系统调用上（`SYS_MEMINFO` / `SYS_TASKS` /
+`SYS_UPTIME`，编号 18–20），所以是 shell 向内核取数，而不是内核自己打印。
+
+### 命令包（自定义命令）
+
+`weave` 进入一个多行编辑界面（行号提示 `1| `、`2| `），**Ctrl+X 保存 / Ctrl+C 丢弃**，
+随后询问包名并存到 BerryFS 的 `bp.<name>`：
+
+```
+berry> weave
+weaving a command package - one command per line
+  ctrl+X save    ctrl+C discard
+1| say hello from a package
+2| bas
+3|
+package name: greet
+woven '/greet' (25 bytes) - run it with /greet
+berry> /greet
+hello from a package
+selftest.txt (14)
+```
+
+- 用 **`/<名字>`** 调用（`/` 单独输入 = 列出所有命令包）。
+- 包名**不得与系统命令重合**，重名会被拒绝并要求换一个；只允许字母/数字/`_`/`-`，最长 20 字符。
+- 包内可以调用另一个包；深度上限 4 层，且拒绝自引用（`/loop` 里写 `/loop` → `recursive package, refused`）。
+- 存在 BerryFS 上，所以**跨重启存活**。
+
+### 键盘
+
+命令包的 Ctrl+X / Ctrl+C 需要驱动支持：`drivers/keyboard.c` 增加了 Ctrl 状态
+（make code `0x1D`），Ctrl+字母映射为控制码，且 **Ctrl+X / Ctrl+C 会像回车一样提交当前行**
+—— 否则阻塞在 `sys_read()` 的读者要等到用户再按一次回车才会醒。
+
+### 验证
+
+```powershell
+python tools/shell_smoke.py          # 对 build/disk.img：全量（含命令包）
+python tools/shell_smoke.py iso      # 对 build/berryos.iso：跳过命令包
+```
+
+脚本无窗口启动 QEMU，用 monitor 的 `sendkey` 把真实扫描码打进 PS/2 驱动，
+每一步抓帧并对转录做断言；截图与转录落在 `build/shell_smoke/`。
+（`serial_putc()` 写的是 QEMU debugcon 端口 0xE9 而不是 COM1，所以转录取自
+`-debugcon file:`，`-serial` 抓不到东西。）
+
+> 踩坑记录：
+> - **ISO 启动时 BerryFS 是关的**：从光驱启动没有 IDE 硬盘，`[BFS] no disk: filesystem disabled`，
+>   命令包存不下来 —— 测命令包必须用 `disk.img`。
+> - **旧 ISO 会伪装成"功能没生效"**：`build.ps1` 只重建 `disk.img`，ISO 要另外跑
+>   `tools/make_iso.py`。忘了这一步，shell 跑的还是上一版内核，症状是提示符和帮助都是旧的。
+
+## M5 Bui 桌面（已完成）
+
+分屏 demo 被整体替换：**整屏归桌面**，命令行 shell 变成桌面上一个可移动、可关闭的窗口。
+
+### 1. Bui —— 界面即文本
+
+`Bui`（Berry User Interface）既是**整个系统的渲染层**，也是一门声明式小语言。所有绘制都
+经过 `bui_*`（`drivers/bui.c`），而这套原语里**只有一处知道裁剪矩形** —— 正因如此，
+"只重绘这一块"才成为可能。
+
+```
+bui 1
+theme wall #101820
+theme panel #1B2430
+theme accent #6CA8FF
+grid 40 60 132 128
+window "Bui Playground" 240 150 780 500
+rect   24 24 340 130 #1E2A3A
+label  44 46 "this window is just Bui text" #9BD770
+button 24 190 224 46 "say hello" #27324A :say hello from a Bui button
+term   24 264 736 210
+```
+
+| 指令 | 作用 |
+|---|---|
+| `bui <ver>` | 魔数行（独立文件的首行） |
+| `theme <key> <#rrggbb>` | `wall` `panel` `ink` `accent` `termfg` `termbg` `face` `facehi` |
+| `grid x y dx dy` | 桌面图标网格（只用于 desktop.bui） |
+| `window "<标题>" x y w h` | 该界面所属窗口，标题栏就用这个名字 |
+| `rect` / `label` / `button` / `term` | 控件；坐标相对窗口客户区 |
+
+按钮动作是 `:close` / `:say <文本>` / `:fill <#rrggbb>` / `:open <应用>`。`:fill` 直接改
+Bui 文档里那个 `rect` 节点的颜色 —— **可变节点就是"能交互"的全部实现**，系统里没有任何
+widget 对象。`term` 是活控件：它显示的就是 shell 的那块终端面。
+
+桌面的主题与图标网格放在 BerryFS 的 `desktop.bui`（首次启动自动种下）。**改这个文件再重启，
+桌面外观就变了，不必重编内核**；内建的 About 与 Bui Playground 窗口本身也是一段 Bui 文本。
+
+### 2. .bppg —— 文本可执行程序
+
+BerryFS 单文件上限 8×512 = 4096 字节，装不下任何有意义的 ELF，但装得下一个**文本程序**：
+
+```
+bppg 1
+name Hello
+icon H
+color #9BD770
+ui
+  window "Hello - a .bppg program" 220 140 720 470
+  label  26 24 "this window came from hello.bppg" #9BD770
+  button 26 116 200 46 "say hi" #27324A :say hi from hello.bppg
+  term   26 184 668 250
+run
+  say hello.bppg ran its own run script
+  season
+```
+
+`ui` 段是 Bui，`run` 段是**普通 shell 脚本**。打开时桌面把 `run` 的行**塞进键盘队列**，
+于是程序拿到的正是"坐在提示符前的那个人"的权限与词汇 —— 没有私有 ABI、没有新系统调用，
+这就是选择"文本程序"的意义。BerryFS 上每个 `*.bppg` 自动成为一个桌面图标，双击即开
+（也可以 `pane open <名字>`）。
+
+### 3. 全屏窗口管理器
+
+- 壁纸 + 图标列（列优先排布）+ 底部任务栏（窗口按钮、`berry`、运行时长）。
+- 窗口：拖标题栏移动、右上角关闭、点标题栏置顶；标题取自 Bui 的 `window` 行；最多 6 个。
+- 重绘是**分区的**：指针移动只重画 16×16 的光标；shell 有输出只重画显示终端的那块矩形；
+  拖动只重画新旧矩形的并集。Bui 原语对裁剪矩形提前退出，`redraw()` 才可以写成"画全部"
+  而几乎不花代价。
+
+### shell 是怎么进到窗口里的
+
+`sys_write()` 不再直接写帧缓冲控制台，而是写进**终端文本面**（`drivers/tcon.c`）；桌面
+每帧把这块面画进 Terminal 窗口的客户区。所以 shell 没有为"可移动、可关闭"改过一行。
+`wipe`（清屏）同理只作用于这块面。
+
+- `bloom` 把用户态图形画进 **Canvas 窗口**：有桌面时 `SYS_GFX_*` 以该窗口的**独立后备缓冲**
+  为目标（坐标相对窗口，超出即裁掉），所以画完不会在下次重绘时被擦掉。
+- `pane` 让 shell 反过来操作窗口：`pane` 列出窗口与应用、`pane open <应用>`、`pane close`。
+  走新增的 `SYS_DESKTOP`（21 号系统调用），内核并不知道"pane"这个词。
+- Terminal 的终端网格（列×行）由窗口客户区大小决定，也就是**由桌面决定 shell 的屏幕尺寸**。
+
+### 验证
+
+```powershell
+python tools/desktop_smoke.py    # 无窗口启动：像素断言 + 键盘 + 真鼠标
+python tools/desktop_probe.py    # 逐步输入、逐帧读数（诊断用）
+```
+
+`desktop_smoke.py` 用三类断言，"画出来了没有"光看日志是答不了的：
+
+1. **像素**：用 Pillow 在截图上按精确颜色断言 —— 壁纸带、任务栏底色与其文字色、图标底色、
+   终端文字色各自出现在该出现的位置。QEMU 的 PPM 是 RGB888，24bpp 下颜色不打折。
+2. **键盘**：monitor 的 `sendkey` 打真实扫描码，断言转录。
+3. **鼠标**：`mouse_move` / `mouse_button` 驱动真 PS/2 鼠标。光标定位靠"屏幕上唯一的纯黑像素"
+   （主题里没有别的 `#000000`），点击图标则以选中高亮出现为证，双击开窗以窗口列表为证。
+
+任务栏按钮数按窗口数断言（`1 → 2 → 3`），这条专抓"窗口出来了、任务栏却没更新"。
+
+> 踩坑记录（每一条都是先看见怪现象、再挖到根因）：
+> - **`.bss` 越界会伪装成别处的崩溃**：`pmm_init()` 把 `[0, 0x200000)` 留给早期内核栈，
+>   所以内核镜像（含 `.bss`）必须止步于此。给画布声明一个 1.4 MB 静态数组就把
+>   `__kernel_end` 推过了线，PMM 于是把仍属内核的页发给任务栈，画布第一次写入就毁掉栈，
+>   表现成**毫不相关代码里的取指异常 → 三重故障**。现在 `kmain()` 一进来就打印
+>   `__kernel_end` 并对照 0x200000 报警，画布改用 `kmalloc`。
+> - **"先画后清标志"会丢更新**：桌面一次全屏重绘可能耗时百毫秒级，其间 shell 被调度进来
+>   开了新窗口并置上"整屏重绘"，桌面画完却把这个请求清掉了 —— 症状是窗口出现了、任务栏
+>   没有它的按钮。改成**先原子领取（`cli()` 里取走并清零）再绘制**：绘制期间产生的变化会
+>   重新置位，下一轮生效。
+> - **逐像素调用的填充太慢**：`fb_fill_rect()` 原本逐像素调 `fb_put_pixel()`，一次 1280×1024
+>   全屏填充 = 130 万次调用，而桌面每次结构变化都要全屏重绘，模拟环境下肉眼可见地卡。
+>   现在按行打包填充（`fill_row`），字形按行程绘制，终端空白单元直接跳过。
+> - **窗口内容会溢出客户区**：Bui 控件坐标是窗口相对的，超出窗口的 `term` 会画到边框外。
+>   现在画内容前把裁剪矩形**收紧到客户区**（`bui_clip_narrow`），画完还原。
+> - **双击会被重绘吃掉**：每次按键抬起都触发一次全屏重绘，把双击的第二次按下吞掉了。
+>   现在抬起不再重绘（拖动过程中已经逐帧重画过），选中只重画该图标那一小块。
 
 ## 路线图
 
@@ -354,7 +572,17 @@ python build/grab_click.py           # 注入点击，确认计数 0 -> 1
   - ✅ 屏幕分区（控制台上半 / GUI 下半）
   - ✅ GUI 任务：窗口 + 按钮 + 计数 + 鼠标光标
   - ✅ PS/2 鼠标驱动 + PIC 级联修复
-- **M4** 桌面闭环：WM + 自研 GUI 工具包 + BerryFS 完善 + 终端 demo。
+- **M4** 设备框架 + BerryFS 持久化文件系统（✅ 已完成）：
+  - ✅ 驱动注册框架、ATA PIO、帧缓冲控制台
+  - ✅ BerryFS：单目录、64 inode、文件 ≤ 4096 B；无盘时**诚实失败**
+  - ✅ shell 果园命令语言 + 命令包（`weave` / `/<name>`）
+- **M5** 桌面闭环（✅ 已完成）：
+  - ✅ Bui 渲染层 + 声明式界面语言（主题 / 窗口 / 控件 / 动作）
+  - ✅ 全屏窗口管理器：图标、任务栏、拖动、置顶、关闭、分区重绘
+  - ✅ shell 进窗口（终端文本面 + `tcon`），`pane` 反向操作窗口
+  - ✅ `.bppg` 文本可执行程序（Bui 界面 + shell 脚本），磁盘上的 `*.bppg` 自动成为图标
+  - ✅ Canvas 窗口：用户态 `SYS_GFX_*` 有独立后备缓冲，绘制跨重绘保留
+  - ⬜ 窗口缩放 / 最小化、文件管理器、多虚拟桌面、`.bppg` 增加"定义新命令"的钩子
 - **M5** GPU 直驱 + 多设备 + 中文输入法 + SDK/文档/镜像交付。
 
 > 注：本仓库代码使用 LLVM/GNU 工具链语法。若 LLVM 集成汇编器对 16 位实模式支持有差异，
