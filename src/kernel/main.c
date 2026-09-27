@@ -37,7 +37,7 @@ void kmain(uint64_t fb_phys, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bp
     serial_init();
     vga_init();
 
-    serial_puts("BerryOS 0.0.1 -- hybrid kernel booting on x86_64\r\n");
+    serial_puts("BerryOS 0.0.2 -- hybrid kernel booting on x86_64\r\n");
 
     /* ---- memory-layout guard -------------------------------------------
      * The early kernel stack sits at 0x200000 (start.S) and pmm_init()

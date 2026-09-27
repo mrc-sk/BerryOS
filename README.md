@@ -260,7 +260,7 @@ VBoxManage startvm BerryOS
 > 1280×1024×**15bpp**，硬编码 1024×768/pitch 4096 会让每行 stride 全部错位，
 > 表现为花屏 / 条纹。现在几何全部从 VBE 返回值读取，并按真实 bpp 打包像素。
 
-> 已在本机通过 QEMU 11.1 验证：串口输出 `BerryOS 0.0.1 -- hybrid kernel booting on x86_64`，VGA 文本内存为 `BerryOS 0.0.1`。
+> 已在本机通过 QEMU 11.1 验证：串口输出 `BerryOS 0.0.2 -- hybrid kernel booting on x86_64`，VGA 文本内存为 `BerryOS 0.0.2`。
 
 ## M1 内存子系统（阶段二）
 

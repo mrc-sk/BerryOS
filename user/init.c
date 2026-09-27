@@ -237,7 +237,7 @@ static void cmd_wipe(char* argv[], int argc){
 
 static void cmd_roots(char* argv[], int argc){
     (void)argv; (void)argc;
-    out("BerryOS 0.0.1 - hybrid x86_64 kernel\r\n");
+    out("BerryOS 0.0.2 - hybrid x86_64 kernel\r\n");
     out("M1 boot mm paging sched   M2 multiprocess   M3 keyboard\r\n");
     out("M4 device framework + BerryFS persistent filesystem\r\n");
     out("M5 Bui desktop: window manager + .bppg text programs\r\n");

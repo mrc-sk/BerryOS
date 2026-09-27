@@ -884,7 +884,7 @@ static void apps_build(void){
 }
 
 static void desktop_banner(void){
-    tcon_puts("BerryOS 0.0.1 - Bui desktop\r\n");
+    tcon_puts("BerryOS 0.0.2 - Bui desktop\r\n");
     tcon_puts("the shell runs in this window; '?' lists the commands\r\n");
     tcon_puts("double-click a desktop icon to open an application\r\n");
     tcon_puts("\r\n");
