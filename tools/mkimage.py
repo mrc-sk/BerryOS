@@ -10,22 +10,34 @@
 # non-commercial restriction terms that apply to this software.
 """Pack BerryOS raw disk image (two-stage boot):
 
-    LBA 0 : MBR (with partition table, loaded by BIOS at 0x7C00)
-    LBA 1 : stage2 bootloader (loaded by MBR to 0x20000)
-    LBA 2+: raw kernel image (copied by stage2 to 0x7E00)
+    LBA 0    : MBR (with partition table, loaded by BIOS at 0x7C00)
+    LBA 1..2 : stage2 bootloader (two sectors, loaded by MBR to 0x7000)
+    LBA 3+   : raw kernel image (copied by stage2 to 0x7E00)
+
+stage2 grew to two sectors because 494 bytes left no room for the A20 / VBE
+portability work; the MBR reads both and the kernel consequently starts one
+sector later.  Keep these three numbers in sync with src/boot/x86_64/*.S.
 
 Usage: mkimage.py <mbr.bin> <stage2.bin> <kernel.bin> <disk.img>
 """
 import os
 import sys
 
+MBR_SECTORS = 1
+STAGE2_SECTORS = 2
 
-def read_last_512(path, what):
+
+def read_tail(path, what, nbytes):
+    """Return the last `nbytes` of a bootloader image.
+
+    objcopy -O binary emits the whole `.org`-based section, so the files start
+    with `org` bytes of zero padding and the real image is the tail.
+    """
     with open(path, "rb") as f:
         data = f.read()
-    if len(data) < 512:
-        sys.exit("error: %s too small (%d bytes, need >= 512)" % (what, len(data)))
-    return data[-512:]
+    if len(data) < nbytes:
+        sys.exit("error: %s too small (%d bytes, need >= %d)" % (what, len(data), nbytes))
+    return data[-nbytes:]
 
 
 def main():
@@ -34,13 +46,15 @@ def main():
 
     mbr_path, st2_path, kern_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
-    mbr = read_last_512(mbr_path, "mbr.bin")
-    st2 = read_last_512(st2_path, "stage2.bin")
+    mbr = read_tail(mbr_path, "mbr.bin", MBR_SECTORS * 512)
+    st2 = read_tail(st2_path, "stage2.bin", STAGE2_SECTORS * 512)
     with open(kern_path, "rb") as f:
         kern = f.read()
 
+    # The signature sits at the end of each image, so its offset scales with
+    # the sector count.
     for what, blob in (("mbr", mbr), ("stage2", st2)):
-        if blob[510] != 0x55 or blob[511] != 0xAA:
+        if blob[-2] != 0x55 or blob[-1] != 0xAA:
             sys.exit("error: missing 0xAA55 boot signature in %s" % what)
 
     size = 16 * 1024 * 1024  # 16 MiB image
@@ -57,9 +71,11 @@ def main():
     else:
         img = bytearray(size)
 
-    img[0:512] = mbr
-    img[512:1024] = st2
-    img[1024:1024 + len(kern)] = kern
+    st2_off = MBR_SECTORS * 512
+    kern_off = st2_off + STAGE2_SECTORS * 512
+    img[0:st2_off] = mbr
+    img[st2_off:kern_off] = st2
+    img[kern_off:kern_off + len(kern)] = kern
 
     with open(out_path, "wb") as f:
         f.write(img)

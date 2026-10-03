@@ -141,6 +141,27 @@ void timer_init(uint32_t hz);
 uint64_t timer_ticks(void);
 void timer_tick(void);
 
+/* ---- Bootloader handover: the E820 memory map -------------------------
+ * The real-mode probe in boot.S (ISO path) / mbr.S (raw-disk path) walks
+ * int 0x15 EAX=0xE820 and stashes the result at physical 0x6800 as
+ *   u16 count, then `count` entries of 24 bytes each.
+ * start.S copies it into the globals below while the boot page tables still
+ * identity-map low memory; kmain() must not read 0x6800 directly because by
+ * then paging may no longer cover it.
+ *
+ * If g_e820_count is 0 the probe failed (or the bootloader predates it) and
+ * pmm_init() falls back to assuming PHYS_MEM_SIZE -- the pre-E820 behaviour. */
+#define E820_MAX 32
+struct e820_entry {
+    uint64_t base;
+    uint64_t len;
+    uint32_t type;   /* 1 = usable RAM; anything else must stay reserved */
+    uint32_t attr;   /* ACPI 3.x extended attributes (ignored) */
+};
+#define E820_TYPE_USABLE 1
+extern struct e820_entry g_e820[E820_MAX];
+extern uint32_t g_e820_count;
+
 /* Physical memory manager (buddy system) */
 void pmm_init(void);
 uint64_t pmm_alloc_pages(int order);
@@ -150,6 +171,17 @@ void pmm_free_page(uint64_t phys);
 uint64_t pmm_total(void);
 uint64_t pmm_free_bytes(void);
 uint64_t pmm_allocated(void);
+
+/* Memory primitives (src/kernel/lib/kstring.c).
+ *
+ * These must exist because we build with -nostdlib: clang turns large struct
+ * assignments into memcpy calls, so without them the link fails outright.
+ * They are declared here (they previously were not, which is why several
+ * files grew private kmemcpy()/kmemset() copies). */
+void* memcpy(void* dst, const void* src, size_t n);
+void* memmove(void* dst, const void* src, size_t n);
+void* memset(void* dst, int c, size_t n);
+int   memcmp(const void* a, const void* b, size_t n);
 
 /* Slab allocator (kmalloc/kfree) */
 void slab_init(void);

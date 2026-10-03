@@ -61,6 +61,8 @@ K_OBJS := $(BUILD)/main.o \
           $(BUILD)/drivers/tcon.o \
           $(BUILD)/drivers/desktop.o \
           $(BUILD)/drivers/ata.o \
+          $(BUILD)/drivers/pci.o \
+          $(BUILD)/drivers/ahci.o \
           $(BUILD)/drivers/fb.o \
           $(BUILD)/drivers/dev.o \
           $(BUILD)/fs/berryfs.o \
@@ -221,6 +223,21 @@ $(DISK): $(MBR_BIN) $(STAGE2_BIN) $(KERNEL_BIN) tools/mkimage.py
 # ---- vmdk (VMware) ----
 vmdk: $(DISK)
 	qemu-img convert -f raw -O vmdk $(DISK) $(BUILD)/berryos.vmdk
+
+# ---- UEFI: bootx64.efi (PE32+ app) + esp.img (GPT/FAT32 system partition) ----
+# The UEFI path has no boot sector: the firmware loads an EFI application from
+# \EFI\BOOT\BOOTX64.EFI.  tools/mkefi.py assembles the stub and appends the
+# kernel at KERNEL_RVA; tools/mkfat.py wraps it in a GPT ESP.
+EFI_BIN := $(BUILD)/bootx64.efi
+ESP_IMG := $(BUILD)/esp.img
+
+$(EFI_BIN): $(BOOT_DIR)/efi.S $(BOOT_DIR)/boot.ld $(KERNEL_BIN) tools/mkefi.py
+	$(PY) tools/mkefi.py $(CC) $(LD) $(OBJCOPY) $(BOOT_DIR)/efi.S $(KERNEL_BIN) $@
+
+$(ESP_IMG): $(EFI_BIN) tools/mkfat.py
+	$(PY) tools/mkfat.py $@ /EFI/BOOT/BOOTX64.EFI:$(EFI_BIN)
+
+efi: $(EFI_BIN) $(ESP_IMG)
 
 # ---- regenerate the boot-splash wordmark asset (needs Python + Pillow) ----
 splashlogo:

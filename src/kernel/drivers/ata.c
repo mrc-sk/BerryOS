@@ -10,6 +10,7 @@
  */
 #include "berryos.h"
 #include "ata.h"
+#include "ahci.h"
 
 /* =====================================================================
  * ATA/IDE PIO driver (M4 framework).
@@ -43,6 +44,7 @@
 #define CMD_FLUSH    0xE7
 
 static int   g_ata_ok = 0;
+static int   g_use_ahci = 0;   /* 1 = sectors go through the AHCI DMA driver */
 static char  g_model[ATA_MODEL_LEN];
 
 /* Wait until BSY clears. Returns 0 on success, -1 on timeout. */
@@ -72,6 +74,16 @@ const char* ata_model(void){ return g_model; }
 void ata_init(void){
     uint16_t id[256];
     int i;
+
+    /* Prefer AHCI: VMware / VirtualBox-SATA / ICH9-q35 present the boot disk
+     * behind a PCI AHCI controller that legacy port 0x1F0 cannot reach.  Only
+     * when no usable AHCI disk turns up do we fall back to PIO on the primary
+     * IDE bus (QEMU's default i440fx IDE disk, old boards). */
+    if (ahci_init(g_model, ATA_MODEL_LEN)){
+        g_use_ahci = 1;
+        g_ata_ok   = 1;
+        return;
+    }
 
     /* Select primary master (LBA mode). */
     outb(ATA_DRVHD, 0xE0);
@@ -105,6 +117,7 @@ int ata_read_sectors(uint32_t lba, uint32_t count, void* buf){
     uint32_t i;
     if (!g_ata_ok || count == 0) return -1;
     if (count > 256) count = 256;
+    if (g_use_ahci) return ahci_read_sectors(lba, count, buf);
 
     outb(ATA_DRVHD, 0xE0 | ((lba >> 24) & 0x0F));
     outb(ATA_SECCNT, (uint8_t)(count == 256 ? 0 : count));
@@ -126,6 +139,7 @@ int ata_write_sectors(uint32_t lba, uint32_t count, const void* buf){
     uint32_t i;
     if (!g_ata_ok || count == 0) return -1;
     if (count > 256) count = 256;
+    if (g_use_ahci) return ahci_write_sectors(lba, count, buf);
 
     outb(ATA_DRVHD, 0xE0 | ((lba >> 24) & 0x0F));
     outb(ATA_SECCNT, (uint8_t)(count == 256 ? 0 : count));

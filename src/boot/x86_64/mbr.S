@@ -17,9 +17,9 @@
  * the kernel (LBA 2+) into 0x7E00 and enters long mode.
  *
  * Layout of build/disk.img:
- *   LBA 0 : this MBR (with partition table)
- *   LBA 1 : stage2 (512 bytes, at 0x7000)
- *   LBA 2+: raw kernel image (copied to 0x7E00 by stage2)
+ *   LBA 0    : this MBR (with partition table)
+ *   LBA 1..2 : stage2 (two sectors, at 0x7000..0x7400)
+ *   LBA 3+   : raw kernel image (copied to 0x7E00 by stage2)
  */
 .code16
 .org 0x7C00
@@ -41,7 +41,37 @@ _start:
     movw $0x2401, %ax
     int  $0x15
 
-    /* Read stage2 (LBA 1, 1 sector) into 0x7000 via int 0x13 AH=42h.
+    /* --- E820: ask the BIOS for the real memory map ----------------------
+     * The kernel used to assume a fixed 128 MiB, which is right for QEMU but
+     * wrong on real hardware: 4..32 GiB, plus reserved holes (ACPI tables,
+     * local APIC, ...) that must never be handed out as free RAM.
+     *
+     * It happens here and not in stage2 because stage2's 512-byte sector is
+     * already down to ~8 free bytes; the MBR has plenty.  The ISO path does
+     * the identical walk in boot.S.  Both use the same 0x6800 layout:
+     *   u16 entry count, then 24-byte entries.
+     * Do this BEFORE the int 0x13 read below, which repoints es. */
+    movw $0x6800, %di
+    movw $0, 0x6800          /* entry count = 0 */
+    addw $4, %di             /* first entry slot at 0x6804 */
+    xorl %ebx, %ebx          /* continuation value: 0 starts the walk */
+e820_next:
+    movl $0x0000E820, %eax
+    movl $0x534D4150, %edx   /* 'SMAP' */
+    movl $24, %ecx           /* ask for the full ACPI 3.x entry */
+    int  $0x15
+    jc   e820_done           /* CF set: end of map (or E820 unsupported) */
+    cmpl $0x534D4150, %eax   /* the BIOS must echo 'SMAP' */
+    jne  e820_done
+    incw 0x6800              /* count the entry we just received */
+    testl %ebx, %ebx         /* ebx == 0 -> that was the last one */
+    jz   e820_done
+    addw $24, %di
+    cmpw $(0x6804 + 32 * 24), %di   /* cap at 32 entries (0x6B04) */
+    jb   e820_next
+e820_done:
+
+    /* Read stage2 (LBA 1, 2 sectors) into 0x7000 via int 0x13 AH=42h.
      * es:bx = 0x0700:0x0000 = 0x7000. */
     movb $0x80, %dl              /* raw hard disk */
     movw $0x0700, %ax
@@ -64,7 +94,7 @@ fail:
 dap:
     .byte 0x10                  /* packet size */
     .byte 0                     /* reserved */
-    .word 1                     /* sectors */
+    .word 2                     /* sectors: stage2 is two sectors (0x7000..0x7400) */
     .word 0x0000                /* offset */
     .word 0x0700                /* segment -> 0x7000 */
     .long 1                     /* LBA low = 1 (stage2) */

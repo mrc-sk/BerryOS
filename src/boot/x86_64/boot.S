@@ -18,8 +18,8 @@
  *                (kernel).  No int 0x13 disk reads are needed, which sidesteps
  *                floppy-emulation geometry/drive pitfalls.
  *                Built as build/boot.bin, loaded by the BIOS at 0x7C00.
- *   -DDISK_BOOT  raw hard disk / USB variant ("stage2").  The MBR only reads
- *                this one sector, so it must fetch the kernel (LBA 2+) itself.
+ *   -DDISK_BOOT  raw hard disk / USB variant ("stage2").  The MBR reads these
+ *                TWO sectors, so it must fetch the kernel (LBA 3+) itself.
  *                Built as build/stage2.bin, loaded by the MBR at 0x7000.
  *
  * Flow:
@@ -71,6 +71,23 @@ _start:
     movw %ax, %es
     movw %ax, %ss
     movw $0x0600, %sp          /* stack grows down from 0x600 (away from boot code & kernel) */
+    cld                        /* lodsw in the VBE loop below relies on DF=0 */
+
+    /* --- Enable the A20 line ---------------------------------------------
+     * The kernel is copied to 0x100000, which is NOT reachable while A20 is
+     * held low: the address wraps back to 0x000000, so the copy quietly
+     * overwrites the IVT, the BDA and this very boot sector, and the jump
+     * lands in garbage.  On a virtual machine that surfaces as "the CPU has
+     * been disabled by the guest OS" (VMware) or a triple fault -- an
+     * unrecoverable error with no kernel output at all.
+     *
+     * SeaBIOS (QEMU) happens to hand us A20 already enabled, which is why the
+     * bug hid for so long; the Phoenix-derived BIOS in VMware makes no such
+     * promise.  Fast A20 via port 0x92 is the most portable single method;
+     * the MBR additionally issues int 0x15 AX=0x2401 on the raw-disk path. */
+    inb  $0x92, %al
+    orb  $0x02, %al
+    outb %al, $0x92
 
     /* --- Kernel image source (two boot paths) ----------------------------
      *  a) El Torito *no-emulation* ISO: the BIOS has ALREADY loaded the whole
@@ -99,7 +116,7 @@ _start:
      * The destination (0x7E00 + KERNEL_SECTORS*512) must stay clear of the
      * EBDA at 0x9FC00 -- tools/kern_size.py enforces that at build time. */
     movw $0x07E0, %bx            /* buffer segment cursor: bx:0 = 0x7E00 */
-    movw $2, %di                 /* disk: LBA0=MBR, LBA1=stage2, kernel at LBA2 */
+    movw $3, %di                 /* disk: LBA0=MBR, LBA1..2=stage2 (2 sectors), kernel at LBA3 */
 load_loop:
     movw %di, dap + 8            /* DAP LBA low field */
     movw %bx, dap + 6            /* DAP buffer segment (offset field stays 0) */
@@ -109,7 +126,7 @@ load_loop:
     movw %bx, %es                /* mirror the segment for BIOSes that look at es */
     addw $0x20, %bx              /* advance the buffer by one 512-byte sector */
     incw %di
-    cmpw $(2 + KERNEL_SECTORS), %di   /* LBA 2 .. 1+KERNEL_SECTORS (whole image) */
+    cmpw $(3 + KERNEL_SECTORS), %di   /* LBA 3 .. 2+KERNEL_SECTORS (whole image) */
     jne  load_loop
 #endif
     /* --- VBE: pick a 32bpp LFB mode, then read the REAL geometry ----------
@@ -123,24 +140,36 @@ load_loop:
      * example, accepts the mode but reports its own 1280x1024 RGB555 surface --
      * and assuming "1024x768x32" there is exactly what produced the garbled,
      * striped display.  So we stash whatever the BIOS actually reports and let
-     * the kernel render to that bpp (see fb.c: fb_put_pixel). */
+     * the kernel render to that bpp (see fb.c: fb_put_pixel).
+     *
+     * The CANDIDATE LIST matters more than it looks.  VBE 2.0 has no
+     * "give me your best mode" call -- the only portable way is to walk the
+     * mode table pointed at by VbeInfoBlock.VideoModePtr, and that does not
+     * fit in a 512-byte sector.  So we try the standard 7-bit VESA mode
+     * numbers (bit 14 set = ask for a linear framebuffer) from the largest
+     * down and take the first one the BIOS accepts.  Every emulator and most
+     * real BIOSes implement these.  The old list had just three entries and
+     * lost the moment a BIOS did not happen to offer 1280x1024x24 -- leaving
+     * 0x6000 all zero, i.e. no framebuffer and a text-only console.
+     * Note the mode numbers are 0x4000 | <7-bit VESA number>: 0x11B is
+     * 1280x1024x24, NOT "1024x768x32" as an earlier comment wrongly claimed. */
     movw $0x0500, %cx        /* es = 0x500 -> mode info block at 0x5000 */
     movw %cx, %es
     movw $vbe_modes, %si
 vbe_try:
-    movw (%si), %bx          /* next candidate mode; 0 marks end of list */
-    testw %bx, %bx
+    lodsw                    /* next candidate mode; also advances si by 2 */
+    movw %ax, %bx
+    testw %bx, %bx           /* 0 marks the end of the list */
     jz   vbe_done
-    addw $2, %si
     movw $0x4F02, %ax        /* VBE: set mode */
     int  $0x10
-    cmpw $0x4F, %ax
+    cmpb $0x4F, %al          /* AL == 0x4F: the call succeeded */
     jne  vbe_try
     xorw %di, %di
     movw $0x4F01, %ax        /* VBE: get mode info for the mode just set */
     movw %bx, %cx
     int  $0x10
-    cmpw $0x4F, %ax
+    cmpb $0x4F, %al
     jne  vbe_try
     testb $0x80, 0x5000      /* ModeAttributes bit7: linear framebuffer */
     jz   vbe_try
@@ -168,12 +197,55 @@ pitch_ok:
     movl %eax, 0x6020        /* bpp    */
     jmp  vbe_done
 
-vbe_modes:                   /* candidate modes, best first, 0-terminated */
-    .word 0x411B             /* 1024x768x32 */
-    .word 0x4117             /*  800x600x32 */
-    .word 0x4113             /*  640x480x32 */
+vbe_modes:                   /* 0x4000 | standard VESA number, best first, 0-terminated */
+    .word 0x411B             /* 1280x1024x24 */
+    .word 0x4118             /* 1024x768x24  */
+    .word 0x411A             /* 1280x1024x16 */
+    .word 0x4117             /* 1024x768x16  */
+    .word 0x4116             /* 1024x768x15  */
+    .word 0x4115             /*  800x600x24  */
+    .word 0x4114             /*  800x600x16  */
+    .word 0x4113             /*  800x600x15  */
+    .word 0x4112             /*  640x480x24  */
+    .word 0x4111             /*  640x480x16  */
+    .word 0x4110             /*  640x480x15  */
     .word 0x0000
 vbe_done:
+
+#ifndef DISK_BOOT
+    /* --- E820: ask the BIOS for the real memory map ----------------------
+     * The kernel used to assume a fixed 128 MiB, which is right for QEMU but
+     * wrong on real hardware: those machines have 4..32 GiB *and* reserved
+     * holes (ACPI tables, local APIC, ...) that must never be handed out as
+     * free RAM.  Stash what the BIOS reports at 0x6800 -- a u16 entry count
+     * followed by 24-byte entries -- where start.S picks it up.
+     *
+     * Why here and not in stage2: this is the ISO variant.  The raw-disk path
+     * does the same walk in mbr.S, because stage2's sector has only ~8 bytes
+     * left and cannot hold it.  Both write to the same 0x6800 layout.
+     *
+     * es:di is the BIOS's destination; ds (still 0) is used for the count. */
+    xorw %ax, %ax
+    movw %ax, %es            /* es = 0 (the VBE probe left it at 0x500) */
+    movw %ax, 0x6800         /* entry count = 0 */
+    movw $0x6804, %di        /* first entry slot */
+    xorl %ebx, %ebx          /* continuation value: 0 starts the walk */
+e820_next:
+    movl $0x0000E820, %eax
+    movl $0x534D4150, %edx   /* 'SMAP' */
+    movl $24, %ecx           /* ask for the full ACPI 3.x entry */
+    int  $0x15
+    jc   e820_done           /* CF set: end of map (or E820 unsupported) */
+    cmpl $0x534D4150, %eax   /* the BIOS must echo 'SMAP' */
+    jne  e820_done
+    incw 0x6800              /* count the entry we just received */
+    testl %ebx, %ebx         /* ebx == 0 -> that was the last one */
+    jz   e820_done
+    addw $24, %di
+    cmpw $(0x6804 + 32 * 24), %di   /* cap at 32 entries (0x6B04) */
+    jb   e820_next
+e820_done:
+#endif
 
     /* Load GDT and switch to protected mode */
     lgdt gdt_ptr
@@ -299,10 +371,10 @@ CODE64_SEL = 0x18
 DATA64_SEL = 0x20
 
 #ifdef DISK_BOOT
-. = 0x71EE
-#else
-. = 0x7DEE
-#endif
+/* stage2 is TWO sectors (0x7000..0x7400) so the boot code is not squeezed into
+ * 494 bytes; tools/mkimage.py writes both and the kernel starts at LBA 3.
+ * Our own MBR far-jumps here, so the 0xAA55 at the end is only a marker. */
+. = 0x73EE
 /* Disk Address Packet for int 0x13 AH=42h (LBA extended read). */
 dap:
     .byte 0x10                  /* packet size */
@@ -313,9 +385,11 @@ dap:
     .long 1                     /* LBA low  (start sector 1) */
     .long 0                     /* LBA high */
 
-#ifdef DISK_BOOT
-. = 0x71FE
+. = 0x73FE
 #else
+/* The ISO variant never issues an int 0x13 read (the BIOS already placed the
+ * whole image in RAM), so it carries no DAP at all -- which is 16 more bytes
+ * of code space in the tightest sector of the whole project. */
 . = 0x7DFE
 #endif
 .word 0xAA55                   /* boot signature */

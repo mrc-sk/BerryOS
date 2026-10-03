@@ -39,6 +39,7 @@ void kmain(uint64_t fb_phys, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bp
 
     serial_puts("BerryOS 0.0.2 -- hybrid kernel booting on x86_64\r\n");
 
+
     /* ---- memory-layout guard -------------------------------------------
      * The early kernel stack sits at 0x200000 (start.S) and pmm_init()
      * therefore keeps everything below that address out of the buddy
@@ -78,6 +79,12 @@ void kmain(uint64_t fb_phys, uint32_t w, uint32_t h, uint32_t pitch, uint32_t bp
 
     serial_puts("[M1] initializing physical memory (buddy system) ...\r\n");
     pmm_init();
+    serial_puts("[M1]   e820: ");
+    print_u64(g_e820_count);
+    serial_puts(" entries");
+    if (g_e820_count == 0)
+        serial_puts(" (NO MAP - assuming 128 MiB)");
+    serial_puts("\r\n");
     serial_puts("[M1]   total: ");
     print_mib(pmm_total());
     serial_puts(", free: ");

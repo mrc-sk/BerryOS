@@ -174,6 +174,8 @@ $kCFiles = @(
     (Join-Path $KernDir "drivers/tcon.c"),
     (Join-Path $KernDir "drivers/desktop.c"),
     (Join-Path $KernDir "drivers/ata.c"),
+    (Join-Path $KernDir "drivers/pci.c"),
+    (Join-Path $KernDir "drivers/ahci.c"),
     (Join-Path $KernDir "drivers/fb.c"),
     (Join-Path $KernDir "drivers/dev.c"),
     (Join-Path $KernDir "fs/berryfs.c"),
@@ -259,6 +261,22 @@ $bootBin   = Build-Boot (Join-Path $BootDir "boot.S") "boot"   "-DKERNEL_COPY_BY
 $stage2Bin = Build-Boot (Join-Path $BootDir "boot.S") "stage2" "-DDISK_BOOT -DKERNEL_COPY_BYTES=$kernCopyB -DKERNEL_SECTORS=$kernSectors"
 # mbr.bin   : minimal MBR with partition table (LBA 0)
 $mbrBin    = Build-Boot (Join-Path $BootDir "mbr.S") "mbr" ""
+
+# bootx64.efi: UEFI variant (PE32+ application with the kernel appended).
+# Built from src/boot/x86_64/efi.S; only produced when the toolchain is present.
+$efiBin = Obj "bootx64.efi"
+Write-Host "EFI  $efiBin" -ForegroundColor Gray
+& $PYTHON (Join-Path $Root "tools/mkefi.py") $CLANG $LDLD $OBJCOPY (Join-Path $BootDir "efi.S") $kernBin $efiBin
+if ($LASTEXITCODE -ne 0) { Write-Warning "EFI build failed (non-fatal); legacy boot unaffected" }
+
+# esp.img: GPT + FAT32 EFI System Partition holding bootx64.efi.  A VM booted in
+# UEFI mode (Hyper-V gen 2, VirtualBox/VMware with EFI) needs this -- there is
+# no boot sector to load.  128 MiB because FAT32 is only legal above ~65525
+# clusters; tools/mkfat.py re-reads what it wrote before publishing it.
+$esp = Obj "esp.img"
+Write-Host "ESP  $esp" -ForegroundColor Gray
+& $PYTHON (Join-Path $Root "tools/mkfat.py") $esp ("/EFI/BOOT/BOOTX64.EFI:" + $efiBin)
+if ($LASTEXITCODE -ne 0) { Write-Warning "ESP image failed (non-fatal); legacy boot unaffected" }
 
 # ---- disk image (MBR + stage2 + kernel) ----
 $disk = Obj "disk.img"

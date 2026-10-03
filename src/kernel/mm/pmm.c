@@ -19,19 +19,39 @@
  * that a buddy pair can be merged on free.
  * =================================================================== */
 
-/* Physical memory size to manage (QEMU default: 128 MiB).
- * The kernel image lives in low memory; everything from __kernel_end up
- * to PHYS_MEM_SIZE is carved into buddy blocks at pmm_init(). */
+/* Fallback size when the bootloader handed us no usable E820 map (QEMU-sized).
+ * Real machines are detected instead -- see pmm_init(). */
 #ifndef PHYS_MEM_SIZE
 #define PHYS_MEM_SIZE (128UL * 1024 * 1024)
 #endif
+
+/* Hard ceiling on what we will ever hand out.
+ *
+ * The bootloader's page tables (boot.S) only cover 0..1 GiB with 512 x 2 MiB
+ * pages, so any mem_top above that would hand out physical pages the kernel
+ * cannot actually address: the first task to touch one would page-fault for no
+ * visible reason.  Raising this means growing those page tables first. */
+#define PMM_MAX_MANAGED (1UL * 1024 * 1024 * 1024)
+
+/* The E820 map copied out of low memory by start.S. */
+struct e820_entry g_e820[E820_MAX];
+uint32_t g_e820_count;
 
 struct buddy_block {
     struct buddy_block* next;
 };
 
 static struct buddy_block* free_lists[PMM_MAX_ORDER + 1];
-static uint8_t page_map[PHYS_MEM_SIZE / PAGE_SIZE / 8];  /* 1 bit per page */
+
+/* Bitmap of page allocation state, 1 bit per 4 KiB page (1 = allocated).
+ *
+ * This used to be `static uint8_t page_map[PHYS_MEM_SIZE / PAGE_SIZE / 8]`,
+ * which silently ties the managed memory to a compile-time constant.  Making
+ * it a pointer and placing it just past the kernel image is what lets us
+ * manage however much RAM E820 actually reported.  It must be sized at
+ * runtime, and it must NOT be kmalloc()'d -- kmalloc depends on this
+ * allocator, so we bump-allocate out of the space right after __kernel_end. */
+static uint8_t* page_map;
 
 static uint64_t mem_base;   /* first managed physical address */
 static uint64_t mem_top;    /* one past last managed address */
@@ -150,26 +170,12 @@ uint64_t pmm_allocated(void){
     return pmm_total() - pmm_free_bytes();
 }
 
-void pmm_init(void){
-    extern char __kernel_end[];
-    uint64_t addr, end, blk;
-    int i, order;
-
-    /* The early kernel stack (set in start.S: `movq $0x200000, %rsp`) sits
-     * at 0x200000 and grows DOWN.  It lives inside the low-memory region, so
-     * we must keep the entire [0, KERNEL_STACK_TOP) range out of the buddy
-     * allocator.  Otherwise kmalloc can hand pages that overlap the live
-     * kernel stack and silently corrupt it.  __kernel_end is below the stack
-     * top, so reserving from 0 is the safe (and simplest) choice. */
-    mem_base = 0x200000;   /* KERNEL_STACK_TOP; keep in sync with start.S */
-    mem_top  = PHYS_MEM_SIZE;
-
-    for (i = 0; i <= PMM_MAX_ORDER; i++) free_lists[i] = 0;
-    for (i = 0; i < (int)sizeof(page_map); i++) page_map[i] = 0;
-
-    /* carve the whole region into aligned buddy blocks, largest first */
-    addr = mem_base;
-    end  = mem_top;
+/* Carve [start, end) into aligned buddy blocks, largest first, and mark the
+ * pages free in the bitmap.  Only ever called on ranges that E820 reported as
+ * usable, so reserved holes simply never get pushed. */
+static void carve_range(uint64_t start, uint64_t end){
+    uint64_t addr = start, blk;
+    int order;
     while (addr < end){
         order = PMM_MAX_ORDER;
         blk = (uint64_t)1 << (order + PAGE_SHIFT);
@@ -178,6 +184,87 @@ void pmm_init(void){
             blk >>= 1;
         }
         push_free(addr, order);
+        block_mark(addr, order, 0);
         addr += blk;
+    }
+}
+
+void pmm_init(void){
+    extern char __kernel_end[];
+    uint64_t detected = 0, map_bytes, pages, bm_addr;
+    uint32_t i;
+
+    /* The early kernel stack (set in start.S: `movq $0x200000, %rsp`) sits
+     * at 0x200000 and grows DOWN.  It lives inside the low-memory region, so
+     * we must keep the entire [0, KERNEL_STACK_TOP) range out of the buddy
+     * allocator.  Otherwise kmalloc can hand pages that overlap the live
+     * kernel stack and silently corrupt it.  __kernel_end is below the stack
+     * top, so reserving from 0 is the safe (and simplest) choice. */
+    mem_base = 0x200000;   /* KERNEL_STACK_TOP; keep in sync with start.S */
+
+    /* ---- How much RAM is really there? --------------------------------
+     * Prefer E820.  Take the highest end address of any usable region, so a
+     * machine with RAM spread across several regions still gets all of it
+     * (the individual regions are carved separately below). */
+    for (i = 0; i < g_e820_count && i < E820_MAX; i++){
+        if (g_e820[i].type != E820_TYPE_USABLE) continue;
+        if (g_e820[i].base + g_e820[i].len > detected)
+            detected = g_e820[i].base + g_e820[i].len;
+    }
+    if (detected == 0)
+        mem_top = PHYS_MEM_SIZE;              /* no map: old behaviour */
+    else if (detected > PMM_MAX_MANAGED)
+        mem_top = PMM_MAX_MANAGED;            /* page tables only cover 1 GiB */
+    else
+        mem_top = detected;
+    if (mem_top <= mem_base) mem_top = mem_base + (16UL << 20);   /* paranoia */
+
+    for (i = 0; i <= PMM_MAX_ORDER; i++) free_lists[i] = 0;
+
+    /* ---- Size and place the bitmap ------------------------------------
+     * One bit per page of [mem_base, mem_top).  It goes immediately after the
+     * kernel image, which is the only memory we know for certain is ours and
+     * is not yet claimed by anything else. */
+    pages     = (mem_top - mem_base) >> PAGE_SHIFT;
+    map_bytes = (pages + 7) / 8;
+    bm_addr   = ((uint64_t)__kernel_end + 15) & ~(uint64_t)15;
+    page_map  = (uint8_t*)bm_addr;
+
+    /* The whole low region below mem_base -- kernel image, page tables, the
+     * early stack, and now this bitmap -- is off-limits to the allocator, so
+     * the bitmap must fit underneath.  If it ever does not, clamp instead of
+     * corrupting whatever sits above (and main.c prints the guard line). */
+    if (bm_addr + map_bytes > mem_base){
+        /* 1 bitmap byte covers 8 pages, so `avail` bytes of bitmap describe
+         * avail*8*PAGE_SIZE bytes of RAM.  Give up the tail instead of
+         * scribbling over the early stack. */
+        uint64_t avail = mem_base - bm_addr;
+        mem_top   = mem_base + ((avail * 8) << PAGE_SHIFT);
+        pages     = (mem_top - mem_base) >> PAGE_SHIFT;
+        map_bytes = (pages + 7) / 8;
+    }
+
+    /* Default everything to "not ours".  Only pages inside a usable E820
+     * region get cleared below.  That inversion is deliberate: it means an
+     * unlisted hole (ACPI, APIC, MMIO) is reserved by construction rather
+     * than by remembering to exclude it. */
+    memset(page_map, 0xFF, map_bytes);
+
+    /* ---- Hand out exactly what E820 called usable --------------------- */
+    if (detected == 0){
+        carve_range(mem_base, mem_top);       /* fallback: one flat region */
+    } else {
+        for (i = 0; i < g_e820_count && i < E820_MAX; i++){
+            uint64_t s, e;
+            if (g_e820[i].type != E820_TYPE_USABLE) continue;
+            s = g_e820[i].base;
+            e = g_e820[i].base + g_e820[i].len;
+            if (s < mem_base) s = mem_base;
+            if (e > mem_top)  e = mem_top;
+            s = (s + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+            e = e & ~(uint64_t)(PAGE_SIZE - 1);
+            if (s >= e) continue;
+            carve_range(s, e);
+        }
     }
 }

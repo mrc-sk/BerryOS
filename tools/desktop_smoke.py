@@ -93,13 +93,17 @@ SCREENSHOTS = {"pane", "pane open", "pane list", "bloom", "run bppg", "basket"}
 
 
 def main():
+    # argv[1] = "disk" | "iso"; argv[2] = optional explicit image path, which
+    # lets you test a freshly built ISO when the default one is still held
+    # open by something (e.g. a preview process).
     mode = sys.argv[1] if len(sys.argv) > 1 else "disk"
+    override = sys.argv[2] if len(sys.argv) > 2 else None
     if mode == "iso":
-        img_path = os.path.join(BUILD, "berryos.iso")
+        img_path = override or os.path.join(BUILD, "berryos.iso")
         drive = "file=%s,format=raw,if=ide,media=cdrom" % img_path
         boot = "d"
     else:
-        img_path = os.path.join(BUILD, "disk.img")
+        img_path = override or os.path.join(BUILD, "disk.img")
         drive = "file=%s,format=raw,if=ide" % img_path
         boot = "c"
     if not os.path.isfile(img_path):
