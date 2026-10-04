@@ -185,11 +185,21 @@ vbe_try:
     xorl %eax, %eax
     movw 0x5014, %ax         /* YResolution */
     movl %eax, 0x6010        /* height */
-    movl 0x5040, %eax        /* LinBytesPerScanLine (VBE 2.0+) */
-    testl %eax, %eax
-    jnz  pitch_ok
+    /* pitch (stride).
+     *
+     * BytesPerScanLine at 0x10 is the stride for every VBE since 1.2, and in
+     * a linear mode it is exactly what the pixel writer wants.  The old code
+     * preferred 0x40, which is MaxPixelClock -- a pixel clock in Hz
+     * (148500000 on real hardware).  SeaBIOS leaves 0x40 zero, so the 0x10
+     * fallback ran and everything looked fine; on any firmware that fills it,
+     * the clock was taken as a stride and the image came out sheared.
+     * tools/vbe_probe.py confirms 0x32 (LinBytesPerScanLine) matches 0x10 in
+     * every linear mode, so it only serves as a second chance. */
     xorl %eax, %eax
-    movw 0x5010, %ax         /* fallback: BytesPerScanLine */
+    movw 0x5010, %ax         /* BytesPerScanLine: the stride */
+    testw %ax, %ax
+    jnz  pitch_ok
+    movw 0x5032, %ax         /* LinBytesPerScanLine (VBE 3.0) */
 pitch_ok:
     movl %eax, 0x6018        /* pitch  */
     xorl %eax, %eax
